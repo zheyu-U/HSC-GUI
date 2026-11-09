@@ -10,9 +10,11 @@
 #   pwsh -File scripts/sync-upstream.ps1 -NoFetch       # 复用 .cache/upstream 里已解压的源码
 #   pwsh -File scripts/sync-upstream.ps1 -Ref <分支|标签>
 #
-# 白名单（首版登录 13 个文件）
-#   config.go httpc.go jar.go jar_uid.go util.go session.go
+# 白名单
+# 登录（13 个）：config.go httpc.go jar.go jar_uid.go util.go session.go
 #   creds.go cred_cmd.go cas.go rsa512.go captcha.go login_cmd.go logout.go
+# 课程与任务点（8 个）：courses.go course.go init_cmd.go args.go parallel.go
+#   scan_doc.go video.go video_refresh.go
 # 数据
 #   go/data/captcha-model.json -> internal/hsc/data/captcha-model.json
 #
@@ -37,7 +39,9 @@ $srcRoot = Join-Path $cacheRoot "src"
 $whitelist = @(
     "config.go", "httpc.go", "jar.go", "jar_uid.go", "util.go", "session.go",
     "creds.go", "cred_cmd.go", "cas.go", "rsa512.go", "captcha.go",
-    "login_cmd.go", "logout.go"
+    "login_cmd.go", "logout.go",
+    "courses.go", "course.go", "init_cmd.go", "args.go", "parallel.go",
+    "scan_doc.go", "video.go", "video_refresh.go"
 )
 $dataFiles = @("captcha-model.json")
 

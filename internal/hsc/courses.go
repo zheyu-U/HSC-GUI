@@ -1,0 +1,270 @@
+package hsc
+import (
+	"fmt"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+// CourseItem 课程列表里的一项
+type CourseItem struct {
+	Index    int    `json:"index"`
+	Name     string `json:"name"`
+	Teacher  string `json:"teacher"`
+	CourseID string `json:"courseId"`
+	ClazzID  string `json:"clazzId"`
+	CPI      string `json:"cpi"`
+}
+
+var (
+	reCardStart  = regexp.MustCompile(`<div class="course clearfix`)
+	reCardID     = regexp.MustCompile(`id="c_([0-9]+)"`)
+	reClazzID    = regexp.MustCompile(`class="clazzId"[^>]*value="([0-9]+)"`)
+	rePersonID   = regexp.MustCompile(`class="curPersonId"[^>]*value="([0-9]+)"`)
+	reCourseName = regexp.MustCompile(`class="course-name[^"]*"[^>]*>\s*([^<]{1,80})`)
+	reTeacher    = regexp.MustCompile(`class="line2 color3"[^>]*>\s*([^<]{1,40})`)
+	reStuMiddle  = regexp.MustCompile(`stucoursemiddle\?courseid=([0-9]+)&clazzid=([0-9]+)&cpi=([0-9]+)`)
+)
+
+// fetchCourseList 拉取当前账号的课程列表。
+// 接口是 POST /mooc-ans/visit/courselistdata?courseType=1（courseType=0 会返回空）。
+func fetchCourseList(c *Client) ([]CourseItem, error) {
+	u := smartOrigin + "/mooc-smartcourse/mooc2-ans/visit/courselistdata?courseType=1"
+	_, _, body, err := c.Follow(u, map[string]string{
+		"X-Requested-With": "XMLHttpRequest",
+		"Referer":          smartOrigin + "/mooc-smartcourse/mooc2-ans/visit/interaction",
+	})
+	if err != nil {
+		return nil, err
+	}
+	html := string(body)
+	if len(html) < 500 {
+		return nil, fmt.Errorf("课程列表返回内容过短（%d 字节），可能会话失效", len(html))
+	}
+
+	var out []CourseItem
+	seen := map[string]bool{}
+
+	// 按卡片起始位置切块，每块到下个卡片开头为止
+	starts := reCardStart.FindAllStringIndex(html, -1)
+	for idx, pos := range starts {
+		end := len(html)
+		if idx+1 < len(starts) {
+			end = starts[idx+1][0]
+		}
+		block := html[pos[0]:end]
+		mm := reCardID.FindStringSubmatch(block)
+		if mm == nil {
+			continue
+		}
+		courseID := mm[1]
+		if seen[courseID] {
+			continue
+		}
+		item := CourseItem{CourseID: courseID}
+		if mm := reClazzID.FindStringSubmatch(block); mm != nil {
+			item.ClazzID = mm[1]
+		}
+		if mm := rePersonID.FindStringSubmatch(block); mm != nil {
+			item.CPI = mm[1]
+		}
+		if mm := reCourseName.FindStringSubmatch(block); mm != nil {
+			item.Name = strings.TrimSpace(unescapeHTML(mm[1]))
+		}
+		if mm := reTeacher.FindStringSubmatch(block); mm != nil {
+			item.Teacher = strings.TrimSpace(unescapeHTML(mm[1]))
+		}
+		if item.ClazzID == "" || item.CPI == "" {
+			continue
+		}
+		seen[courseID] = true
+		out = append(out, item)
+	}
+
+	// 兜底：卡片结构变了就按链接抓
+	if len(out) == 0 {
+		for _, m := range reStuMiddle.FindAllStringSubmatch(html, -1) {
+			if seen[m[1]] {
+				continue
+			}
+			seen[m[1]] = true
+			out = append(out, CourseItem{CourseID: m[1], ClazzID: m[2], CPI: m[3]})
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("列表里没解析到课程，可能页面结构变了")
+	}
+	for i := range out {
+		out[i].Index = i + 1
+	}
+	return out, nil
+}
+
+// loadCourseList 优先用缓存，--refresh 时重新拉
+func loadCourseList(c *Client, refresh bool) ([]CourseItem, error) {
+	if !refresh {
+		var cached []CourseItem
+		if err := readJSON(statePath("courses.json"), &cached); err == nil && len(cached) > 0 {
+			return cached, nil
+		}
+	}
+	list, err := fetchCourseList(c)
+	if err != nil {
+		return nil, err
+	}
+	_ = writeJSON(statePath("courses.json"), list)
+	return list, nil
+}
+
+// switchCourse 按序号切课程：写 target.json，并在快照不匹配时重抓
+func switchCourse(c *Client, id int) (Target, error) {
+	return switchCourseOpt(c, id, false)
+}
+
+// switchCourseOpt withScan=true 时顺带扫描练习题（init 用，play/quiz 不需要）
+func switchCourseOpt(c *Client, id int, withScan bool) (Target, error) {
+	// 序号是按「用户刚看到的列表」算的，缓存可能是旧的（课程增减会改变顺序），
+	// 所以切课前先刷新一次；刷新失败才退回缓存。
+	list, err := loadCourseList(c, true)
+	if err != nil {
+		var cached []CourseItem
+		if e := readJSON(statePath("courses.json"), &cached); e != nil || len(cached) == 0 {
+			return Target{}, err
+		}
+		logf("列表刷新失败，用缓存（%d 门）", len(cached))
+		list = cached
+	}
+	if id < 1 || id > len(list) {
+		return Target{}, fmt.Errorf("序号 %d 超出范围（共 %d 门课）", id, len(list))
+	}
+	item := list[id-1]
+	t := Target{
+		Name:     item.Name,
+		CourseID: item.CourseID,
+		ClazzID:  item.ClazzID,
+		CPI:      item.CPI,
+	}
+	if err := writeJSON(statePath("target.json"), t); err != nil {
+		return t, err
+	}
+	logf("已切换到 [%d] %s", item.Index, firstNonEmpty(item.Name, item.CourseID))
+
+	// 快照是别的课的，重抓一份；顺手把练习题那层也扫了，省得用户忘了跑 scan
+	var snap CourseSnapshot
+	if err := readJSON(statePath("course.json"), &snap); err != nil || snap.Target.CourseID != t.CourseID {
+		logf("抓取课程结构…")
+		if _, err := crawlCourse(c, t); err != nil {
+			return t, fmt.Errorf("切换后抓取失败: %w", err)
+		}
+		var scan ScanResult
+		needScan := withScan && (readJSON(statePath("scan.json"), &scan) != nil || scan.CourseID != t.CourseID)
+		if needScan {
+			logf("扫描练习题…")
+			if _, err := scanCourse(c, t); err != nil {
+				logf("扫描失败（不影响播放）: %v", err)
+			}
+		}
+	}
+	return t, nil
+}
+
+// printCourseList 打印课程列表（按显示宽度对齐，中文算两格）
+func printCourseList(list []CourseItem, current Target) {
+	nameW, teacherW := 8, 6
+	for _, it := range list {
+		if w := displayWidth(it.Name); w > nameW {
+			nameW = w
+		}
+		if w := displayWidth(it.Teacher); w > teacherW {
+			teacherW = w
+		}
+	}
+	if nameW > 40 {
+		nameW = 40
+	}
+	if teacherW > 16 {
+		teacherW = 16
+	}
+
+	hdr := padDisplay("序号", 6) + padDisplay("课程", nameW+2) + padDisplay("教师", teacherW+2) + "状态"
+	fmt.Println(strings.TrimRight(hdr, " "))
+
+	for _, it := range list {
+		name := it.Name
+		if name == "" {
+			name = "(未命名 " + it.CourseID + ")"
+		}
+		line := padDisplay(fmt.Sprint(it.Index), 6) +
+			padDisplay(trimDisplay(name, nameW), nameW+2) +
+			padDisplay(trimDisplay(it.Teacher, teacherW), teacherW+2)
+		if it.CourseID == current.CourseID {
+			line += "← 当前"
+		}
+		fmt.Println(strings.TrimRight(line, " "))
+	}
+}
+
+// displayWidth 估算终端显示宽度：CJK / 全角算 2
+func displayWidth(s string) int {
+	w := 0
+	for _, r := range s {
+		if isWideRune(r) {
+			w += 2
+		} else {
+			w++
+		}
+	}
+	return w
+}
+
+func isWideRune(r rune) bool {
+	switch {
+	case r >= 0x1100 && r <= 0x115F,
+		r >= 0x2E80 && r <= 0xA4CF,
+		r >= 0xAC00 && r <= 0xD7A3,
+		r >= 0xF900 && r <= 0xFAFF,
+		r >= 0xFE30 && r <= 0xFE6F,
+		r >= 0xFF00 && r <= 0xFF60,
+		r >= 0xFFE0 && r <= 0xFFE6:
+		return true
+	}
+	return false
+}
+
+// trimDisplay 按显示宽度截断，超长补省略号
+func trimDisplay(s string, width int) string {
+	if displayWidth(s) <= width {
+		return s
+	}
+	var b strings.Builder
+	w := 0
+	for _, r := range s {
+		rw := 1
+		if isWideRune(r) {
+			rw = 2
+		}
+		if w+rw > width-1 {
+			break
+		}
+		b.WriteRune(r)
+		w += rw
+	}
+	return b.String() + "…"
+}
+
+// padDisplay 右侧补空格到指定显示宽度
+func padDisplay(s string, width int) string {
+	if w := displayWidth(s); w < width {
+		return s + strings.Repeat(" ", width-w)
+	}
+	return s
+}
+
+var htmlUnescaper = strings.NewReplacer(
+	"&amp;", "&", "&lt;", "<", "&gt;", ">", "&quot;", `"`,
+	"&#39;", "'", "&nbsp;", " ",
+)
+
+func unescapeHTML(s string) string { return htmlUnescaper.Replace(s) }
+
+var _ = strconv.Itoa
