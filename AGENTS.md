@@ -53,8 +53,11 @@ AI 工具或会话状态。**代理每次动手前先读这两个文件，状态
 - `scripts/sync-upstream.ps1` 从 `codeload.github.com` 下载上游 main 分支 tarball
   （本机 github.com:443 直连不可用，**不要用 `git clone`**），按**功能白名单**复制到
   `internal/hsc/`，改 `package hsc`
-- 首版登录白名单 13 个文件：`config.go httpc.go jar.go jar_uid.go util.go session.go
-  creds.go cred_cmd.go cas.go rsa512.go captcha.go login_cmd.go logout.go`
+- 白名单分两组，共 21 个文件：
+  - 登录（13）：`config.go httpc.go jar.go jar_uid.go util.go session.go
+    creds.go cred_cmd.go cas.go rsa512.go captcha.go login_cmd.go logout.go`
+  - 课程与任务点（8）：`courses.go course.go init_cmd.go args.go parallel.go
+    scan_doc.go video.go video_refresh.go`
 - 不复制 CLI 入口（`main.go` `help.go` `pause.go`）和仓库里的 `hsc-pr.exe`；
   `args.go` 等辅助文件只在白名单功能需要时加入
 - **不改上游文件逻辑**：GUI 适配集中在新文件 `internal/hsc/gui.go`，包括启动时切到

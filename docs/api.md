@@ -99,6 +99,45 @@
 | removed | string[] | 实际删除的文件名，如 `cookies.json`、`cred.enc.json` |
 | message | string | 结果说明，可直接展示 |
 
+### ListCourses(refresh) -> CourseItem[]
+
+获取当前账号的课程列表，需要已登录。
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| refresh | boolean | true 时重新拉取；false 优先用 `state/course/courses.json` 缓存 |
+
+返回 `CourseItem` 数组，字段：`index`、`name`、`teacher`、`courseId`、`clazzId`、`cpi`。
+未登录、会话失效、列表为空时 reject，错误文本可直接展示。
+
+### SelectCourse(index) -> CourseDetail
+
+按列表序号选课：写 `state/course/target.json`，必要时重新抓取课程结构。
+序号对应刚拉取的列表（与 CLI `hsc init <序号>` 一致）；抓取可能需要几秒。
+上游实现见 `go/courses.go` 的 `switchCourseOpt`、`go/course.go` 的 `crawlCourse`。
+
+### RefreshCourse() -> CourseDetail
+
+对当前课程重新抓取章节、视频与作业，写 `state/course/course.json`。
+没有课程配置或未登录时 reject。
+
+### GetCourseDetail() -> CourseDetail
+
+读取本地课程结构缓存，不发起网络请求。
+
+`CourseDetail` 字段：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| hasCourse | boolean | 是否已有课程结构缓存 |
+| stale | boolean | 缓存属于另一门课（需要重新抓取） |
+| target | Target | 课程参数：`name` `courseId` `clazzId` `cpi` `enc` |
+| summary | CourseSummary | `chapters` `videos` `videosPassed` `works` `durationHours` `speedLimited` `fetchedAt` |
+| chapters | CourseChapter[] | `index` `id` `title`（上游章节接口不返回标题，可能为空）`videos` `videosPassed` `works` |
+| videos | CourseVideo[] | `chapterIndex` `chapterId` `title` `duration`（秒）`isPassed` `speedLimited` `playTime` |
+| works | CourseWork[] | `chapterIndex` `chapterId` `title` `workId` `workType` |
+| message | string | 状态说明，可直接展示 |
+
 ### AppMode() -> AppModeInfo
 
 返回构建模式与版本。前端在启动时调用一次，决定显示 release 还是 debug 界面。
