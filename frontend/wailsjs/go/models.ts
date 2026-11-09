@@ -115,3 +115,68 @@ export namespace hsc {
 
 }
 
+export namespace main {
+	
+	export class AppModeInfo {
+	    mode: string;
+	    debug: boolean;
+	    version: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new AppModeInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.mode = source["mode"];
+	        this.debug = source["debug"];
+	        this.version = source["version"];
+	    }
+	}
+	export class DebugEntry {
+	    time: string;
+	    kind: string;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DebugEntry(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.time = source["time"];
+	        this.kind = source["kind"];
+	        this.message = source["message"];
+	    }
+	}
+	export class DebugInfo {
+	    mode: string;
+	    stateDir: string;
+	    cwd: string;
+	    exePath: string;
+	    goVersion: string;
+	    os: string;
+	    arch: string;
+	    cookieCount: number;
+	    loggedIn: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new DebugInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.mode = source["mode"];
+	        this.stateDir = source["stateDir"];
+	        this.cwd = source["cwd"];
+	        this.exePath = source["exePath"];
+	        this.goVersion = source["goVersion"];
+	        this.os = source["os"];
+	        this.arch = source["arch"];
+	        this.cookieCount = source["cookieCount"];
+	        this.loggedIn = source["loggedIn"];
+	    }
+	}
+
+}
+

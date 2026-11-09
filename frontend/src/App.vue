@@ -1,8 +1,12 @@
 <script setup>
-import {computed, onMounted, onUnmounted, ref} from 'vue'
+import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
 import {
+  AppMode,
   CancelQRLogin,
   CheckSession,
+  ClearDebugLog,
+  DebugInfo,
+  DebugLog,
   LoginPassword,
   Logout,
   SessionStatus,
@@ -11,7 +15,10 @@ import {
 } from '../wailsjs/go/main/App'
 import {EventsOff, EventsOn} from '../wailsjs/runtime/runtime'
 
+const mode = ref({mode: 'release', debug: false, version: ''})
 const tab = ref('qr')
+const view = ref('login')
+const justLoggedIn = ref(false)
 const session = ref(null)
 const notice = ref('')
 const noticeKind = ref('info')
@@ -20,6 +27,7 @@ const qrImage = ref('')
 const qrState = ref('idle')
 const qrMessage = ref('')
 const qrRemain = ref(0)
+const qrBusy = ref(false)
 let qrTimer = null
 
 const username = ref('')
@@ -30,22 +38,25 @@ const captchaCode = ref('')
 const captchaBusy = ref(false)
 const loginBusy = ref(false)
 const checkBusy = ref(false)
+const logoutBusy = ref(false)
 const checkMessage = ref('')
 const logoutAll = ref(false)
 
+const debugInfo = ref(null)
+const debugLog = ref([])
+const debugBusy = ref(false)
+
 const loggedIn = computed(() => !!(session.value && session.value.loggedIn))
+const account = computed(() => (session.value && session.value.account) || '')
+const prettySession = computed(() => (session.value ? JSON.stringify(session.value, null, 2) : ''))
+
+function friendly(e) {
+  return String(e).replace(/^Error:\s*/, '')
+}
 
 function setNotice(message, kind) {
   notice.value = message || ''
   noticeKind.value = kind || 'info'
-}
-
-async function refreshSession() {
-  try {
-    session.value = await SessionStatus()
-  } catch (e) {
-    setNotice('读取登录态失败: ' + String(e), 'error')
-  }
 }
 
 function stopQrTimer() {
@@ -67,7 +78,49 @@ function startQrTimer() {
   }, 1000)
 }
 
+async function refreshSession() {
+  try {
+    const s = await SessionStatus()
+    session.value = s
+    if (s.loggedIn && view.value !== 'success') {
+      view.value = 'success'
+      justLoggedIn.value = false
+    }
+  } catch (e) {
+    setNotice('读取登录状态失败: ' + friendly(e), 'error')
+  }
+}
+
+async function refreshDebug() {
+  if (!mode.value.debug) {
+    return
+  }
+  debugBusy.value = true
+  try {
+    debugInfo.value = await DebugInfo()
+    debugLog.value = (await DebugLog()) || []
+  } catch (e) {
+    debugInfo.value = null
+  } finally {
+    debugBusy.value = false
+  }
+}
+
+async function clearDebug() {
+  try {
+    await ClearDebugLog()
+  } catch (e) {
+    // 忽略清空失败，下面刷新会显示实际情况
+  }
+  debugLog.value = []
+  refreshDebug()
+}
+
 async function generateQr() {
+  if (qrBusy.value) {
+    return
+  }
+  qrBusy.value = true
   setNotice('')
   stopQrTimer()
   qrMessage.value = ''
@@ -79,7 +132,11 @@ async function generateQr() {
     startQrTimer()
   } catch (e) {
     qrState.value = 'error'
-    qrMessage.value = String(e)
+    qrMessage.value = friendly(e)
+    setNotice('二维码获取失败: ' + friendly(e), 'error')
+  } finally {
+    qrBusy.value = false
+    refreshDebug()
   }
 }
 
@@ -87,11 +144,13 @@ async function cancelQr() {
   try {
     await CancelQRLogin()
   } catch (e) {
-    setNotice('取消扫码失败: ' + String(e), 'error')
+    setNotice('取消扫码失败: ' + friendly(e), 'error')
   }
   stopQrTimer()
   qrState.value = 'idle'
   qrRemain.value = 0
+  qrImage.value = ''
+  qrMessage.value = ''
 }
 
 function onQrEvent(ev) {
@@ -104,11 +163,28 @@ function onQrEvent(ev) {
   if (ev.state === 'success') {
     stopQrTimer()
     qrImage.value = ''
-    refreshSession()
+    handleLoginSuccess('登录成功，登录态已保存')
   }
-  if (ev.state === 'expired' || ev.state === 'error' || ev.state === 'cancelled') {
+  if (ev.state === 'expired') {
+    stopQrTimer()
+    setNotice('二维码已失效，点“重新生成二维码”再试一次', 'error')
+  }
+  if (ev.state === 'error') {
+    stopQrTimer()
+    setNotice('扫码登录失败: ' + ev.message, 'error')
+  }
+  if (ev.state === 'cancelled') {
     stopQrTimer()
   }
+  refreshDebug()
+}
+
+async function handleLoginSuccess(message) {
+  justLoggedIn.value = true
+  view.value = 'success'
+  setNotice(message, 'ok')
+  await refreshSession()
+  refreshDebug()
 }
 
 async function refreshCaptcha() {
@@ -118,14 +194,15 @@ async function refreshCaptcha() {
     captchaImage.value = res.image
     captchaCode.value = res.suggestedCode || ''
     captchaHint.value = res.hint || (res.suggestedCode
-      ? '自动识别建议 ' + res.suggestedCode + '，可直接提交或手动修改'
+      ? '自动识别建议 ' + res.suggestedCode + '，可直接登录或手动修改'
       : '')
   } catch (e) {
     captchaImage.value = ''
     captchaHint.value = ''
-    setNotice('获取验证码失败: ' + String(e), 'error')
+    setNotice('获取验证码失败: ' + friendly(e), 'error')
   } finally {
     captchaBusy.value = false
+    refreshDebug()
   }
 }
 
@@ -138,8 +215,7 @@ async function submitPassword() {
       password.value = ''
       captchaCode.value = ''
       captchaImage.value = ''
-      setNotice(res.message, 'ok')
-      await refreshSession()
+      await handleLoginSuccess(res.message)
     } else {
       setNotice(res.message, 'error')
       if (!res.need2fa) {
@@ -147,7 +223,7 @@ async function submitPassword() {
       }
     }
   } catch (e) {
-    setNotice(String(e), 'error')
+    setNotice(friendly(e), 'error')
     await refreshCaptcha()
   } finally {
     loginBusy.value = false
@@ -161,27 +237,59 @@ async function checkSession() {
     const res = await CheckSession()
     checkMessage.value = res.message
   } catch (e) {
-    checkMessage.value = String(e)
+    checkMessage.value = friendly(e)
   } finally {
     checkBusy.value = false
+    refreshDebug()
   }
 }
 
 async function doLogout() {
+  logoutBusy.value = true
   try {
     const res = await Logout(logoutAll.value)
-    setNotice(res.message, 'ok')
+    justLoggedIn.value = false
+    view.value = 'login'
+    qrImage.value = ''
+    qrState.value = 'idle'
+    qrMessage.value = ''
     checkMessage.value = ''
+    setNotice(res.message, 'ok')
     await refreshSession()
+    if (!loggedIn.value) {
+      generateQr()
+    }
   } catch (e) {
-    setNotice('退出登录失败: ' + String(e), 'error')
+    setNotice('退出登录失败: ' + friendly(e), 'error')
+  } finally {
+    logoutBusy.value = false
+    refreshDebug()
   }
+}
+
+async function bootstrap() {
+  try {
+    mode.value = await AppMode()
+  } catch (e) {
+    // AppMode 不可用时按 release 处理，保证界面能显示
+  }
+  await refreshSession()
+  if (!loggedIn.value) {
+    generateQr()
+  }
+  refreshDebug()
 }
 
 let offQr = null
 
+watch(tab, (val) => {
+  if (val === 'pw' && !captchaImage.value) {
+    refreshCaptcha()
+  }
+})
+
 onMounted(() => {
-  refreshSession()
+  bootstrap()
   offQr = EventsOn('login:qr', onQrEvent)
 })
 
@@ -198,108 +306,173 @@ onUnmounted(() => {
 <template>
   <div class="page">
     <header class="header">
-      <h1>hsc 课程助手</h1>
-      <p class="subtitle">智慧华中大课程平台登录</p>
+      <div>
+        <h1>hsc 课程助手</h1>
+        <p class="subtitle">智慧华中大课程平台登录</p>
+      </div>
+      <div class="header-side">
+        <span v-if="mode.debug" class="badge">debug 模式</span>
+        <span class="version">v{{ mode.version }}</span>
+      </div>
     </header>
 
     <main class="layout">
       <section class="card login-card">
-        <div class="tabs">
-          <button :class="{active: tab === 'qr'}" @click="tab = 'qr'">扫码登录</button>
-          <button :class="{active: tab === 'pw'}" @click="tab = 'pw'">账号密码登录</button>
+        <div v-if="view === 'success'" class="success">
+          <p class="success-title">{{ justLoggedIn ? '登录成功' : '已登录' }}</p>
+          <p v-if="account" class="success-sub">已登录账号 {{ account }}</p>
+          <p v-else class="success-sub">登录态已保存到本机</p>
+          <p class="success-note">{{ session ? session.message : '' }}</p>
+          <p class="success-tip">登录态和 hsc 命令行通用，可以直接在命令行里做后续操作。</p>
         </div>
 
-        <div v-if="tab === 'qr'" class="pane">
-          <p class="help">用企业微信或「华中大微校园」扫码，二维码 3 分钟内有效。</p>
-          <div v-if="qrImage" class="qr-wrap">
-            <img class="qr" :src="qrImage" alt="登录二维码"/>
-            <p class="status">
-              {{ qrMessage || '等待扫码' }}<span v-if="qrRemain > 0">，剩余 {{ qrRemain }} 秒</span>
-            </p>
+        <template v-else>
+          <div class="tabs">
+            <button :class="{active: tab === 'qr'}" @click="tab = 'qr'">扫码登录</button>
+            <button :class="{active: tab === 'pw'}" @click="tab = 'pw'">账号密码登录</button>
           </div>
-          <div class="actions">
-            <button class="primary" @click="generateQr">{{ qrImage ? '重新生成二维码' : '生成二维码' }}</button>
-            <button v-if="qrImage" @click="cancelQr">取消</button>
-          </div>
-        </div>
 
-        <div v-else class="pane">
-          <div class="field">
-            <label for="username">学号 / 账号</label>
-            <input id="username" v-model="username" type="text" autocomplete="username" placeholder="输入学号或账号"/>
-          </div>
-          <div class="field">
-            <label for="password">密码</label>
-            <input id="password" v-model="password" type="password" autocomplete="current-password" placeholder="输入密码"/>
-          </div>
-          <div class="captcha-row">
-            <div class="captcha-box">
-              <img v-if="captchaImage" class="captcha" :src="captchaImage" alt="验证码" title="点击刷新" @click="refreshCaptcha"/>
-              <span v-else class="captcha-empty">验证码未获取</span>
+          <div v-if="tab === 'qr'" class="pane">
+            <p class="help">用企业微信或「华中大微校园」扫一扫，二维码 3 分钟内有效。</p>
+            <div v-if="qrImage" class="qr-wrap">
+              <img class="qr" :src="qrImage" alt="登录二维码"/>
+              <p class="status">
+                {{ qrMessage || '等待扫码' }}<span v-if="qrRemain > 0">，剩余 {{ qrRemain }} 秒</span>
+              </p>
             </div>
-            <div class="captcha-side">
-              <div class="captcha-actions">
-                <button @click="refreshCaptcha" :disabled="captchaBusy">{{ captchaBusy ? '获取中' : '刷新验证码' }}</button>
-                <input v-model="captchaCode" class="captcha-input" type="text" maxlength="4" placeholder="4 位验证码"/>
+            <div v-else class="qr-empty">
+              <p>{{ qrBusy ? '正在获取二维码，请稍候' : '点下面的按钮获取二维码' }}</p>
+            </div>
+            <div class="actions">
+              <button class="primary" @click="generateQr" :disabled="qrBusy">
+                {{ qrImage ? '重新生成二维码' : '生成二维码' }}
+              </button>
+              <button v-if="qrImage" @click="cancelQr">取消</button>
+            </div>
+          </div>
+
+          <div v-else class="pane">
+            <div class="field">
+              <label for="username">学号 / 账号</label>
+              <input id="username" v-model="username" type="text" autocomplete="username" placeholder="输入学号或账号"/>
+            </div>
+            <div class="field">
+              <label for="password">密码</label>
+              <input id="password" v-model="password" type="password" autocomplete="current-password" placeholder="输入密码"/>
+            </div>
+            <div class="captcha-row">
+              <div class="captcha-box">
+                <img v-if="captchaImage" class="captcha" :src="captchaImage" alt="验证码" title="点击换一张" @click="refreshCaptcha"/>
+                <span v-else class="captcha-empty">验证码未获取</span>
               </div>
-              <p class="captcha-hint">{{ captchaHint }}</p>
+              <div class="captcha-side">
+                <div class="captcha-actions">
+                  <button @click="refreshCaptcha" :disabled="captchaBusy">{{ captchaBusy ? '获取中' : '换一张' }}</button>
+                  <input v-model="captchaCode" class="captcha-input" type="text" maxlength="4" placeholder="4 位验证码"/>
+                </div>
+                <p class="captcha-hint">{{ captchaHint }}</p>
+              </div>
+            </div>
+            <div class="actions">
+              <button class="primary" @click="submitPassword" :disabled="loginBusy">{{ loginBusy ? '登录中' : '登录' }}</button>
             </div>
           </div>
-          <div class="actions">
-            <button class="primary" @click="submitPassword" :disabled="loginBusy">{{ loginBusy ? '登录中' : '登录' }}</button>
-          </div>
-        </div>
+        </template>
       </section>
 
       <aside class="card session-card">
-        <h2>会话状态</h2>
+        <h2>登录状态</h2>
         <p class="status-line">{{ session ? session.message : '读取中' }}</p>
-        <dl v-if="session" class="facts">
+        <dl class="facts">
           <div>
             <dt>账号</dt>
-            <dd>{{ session.account || '未保存' }}</dd>
+            <dd>{{ account || '未保存' }}</dd>
           </div>
           <div>
-            <dt>本地登录态</dt>
-            <dd>{{ loggedIn ? '存在' : '无' }}</dd>
+            <dt>本机登录态</dt>
+            <dd>{{ loggedIn ? '有效' : '无' }}</dd>
           </div>
           <div>
-            <dt>凭据</dt>
-            <dd>{{ session.credSaved ? (session.credEncrypted ? '已加密保存' : '明文保存') : '无' }}</dd>
+            <dt>记住账号</dt>
+            <dd>{{ session && session.credSaved ? '已保存' : '未保存' }}</dd>
           </div>
           <div>
-            <dt>课程配置</dt>
-            <dd>{{ session.hasTarget ? '已配置' : '未配置' }}</dd>
+            <dt>课程信息</dt>
+            <dd>{{ session && session.hasTarget ? '已配置课程' : '未配置课程' }}</dd>
           </div>
-          <div>
-            <dt>state 目录</dt>
-            <dd class="path">{{ session.stateDir }}</dd>
-          </div>
+          <template v-if="mode.debug">
+            <div>
+              <dt>state 目录</dt>
+              <dd class="path">{{ session ? session.stateDir : '' }}</dd>
+            </div>
+            <div>
+              <dt>cookie 数量</dt>
+              <dd>{{ session ? session.cookieCount : 0 }}</dd>
+            </div>
+          </template>
         </dl>
         <div class="actions wrap">
           <button @click="checkSession" :disabled="checkBusy">{{ checkBusy ? '检查中' : '检查会话' }}</button>
           <label class="check"><input v-model="logoutAll" type="checkbox"/> 同时删除已保存凭据</label>
-          <button @click="doLogout">退出登录</button>
+          <button @click="doLogout" :disabled="logoutBusy || !loggedIn">{{ logoutBusy ? '退出中' : '退出登录' }}</button>
         </div>
         <p v-if="checkMessage" class="status">{{ checkMessage }}</p>
       </aside>
     </main>
 
+    <section v-if="mode.debug" class="card debug-panel">
+      <div class="debug-head">
+        <h2>调试信息</h2>
+        <div class="actions">
+          <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
+          <button @click="clearDebug">清空日志</button>
+        </div>
+      </div>
+
+      <div v-if="debugInfo" class="debug-grid">
+        <div><span>模式</span><b>{{ debugInfo.mode }}</b></div>
+        <div><span>state 目录</span><b class="mono">{{ debugInfo.stateDir }}</b></div>
+        <div><span>工作目录</span><b class="mono">{{ debugInfo.cwd }}</b></div>
+        <div><span>可执行文件</span><b class="mono">{{ debugInfo.exePath }}</b></div>
+        <div><span>Go 版本</span><b>{{ debugInfo.goVersion }}</b></div>
+        <div><span>系统</span><b>{{ debugInfo.os }}/{{ debugInfo.arch }}</b></div>
+        <div><span>cookie 数量</span><b>{{ debugInfo.cookieCount }}</b></div>
+        <div><span>登录态</span><b>{{ debugInfo.loggedIn ? '存在' : '无' }}</b></div>
+      </div>
+
+      <h3>最近日志</h3>
+      <ul class="debug-log">
+        <li v-for="(entry, index) in debugLog" :key="index">
+          <span class="mono">{{ entry.time }}</span>
+          <em>{{ entry.kind }}</em>
+          <span>{{ entry.message }}</span>
+        </li>
+      </ul>
+      <p v-if="!debugLog.length" class="caption">暂无日志</p>
+
+      <h3>原始会话状态</h3>
+      <pre class="debug-json">{{ prettySession }}</pre>
+    </section>
+
     <p v-if="notice" class="notice" :class="noticeKind">{{ notice }}</p>
-    <footer class="footer">登录态与 hsc 命令行通用，保存在 state 目录下。</footer>
+    <footer class="footer">登录信息只保存在本机，和 hsc 命令行共用。</footer>
   </div>
 </template>
 
 <style scoped>
 .page {
-  max-width: 960px;
+  max-width: 980px;
   margin: 0 auto;
-  padding: 32px 20px 20px;
+  padding: 28px 20px 20px;
   box-sizing: border-box;
 }
 
 .header {
-  margin-bottom: 24px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
 }
 
 .header h1 {
@@ -311,6 +484,27 @@ onUnmounted(() => {
 .subtitle {
   margin: 4px 0 0;
   color: #646a73;
+}
+
+.header-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.badge {
+  border: 1px solid #f5a623;
+  border-radius: 10px;
+  padding: 1px 8px;
+  color: #a35c00;
+  background: #fff7e6;
+  font-size: 12px;
+}
+
+.version {
+  color: #8f959e;
+  font-size: 12px;
 }
 
 .layout {
@@ -326,6 +520,10 @@ onUnmounted(() => {
   border-radius: 8px;
   padding: 16px;
   box-sizing: border-box;
+}
+
+.login-card {
+  min-height: 360px;
 }
 
 .tabs {
@@ -350,7 +548,7 @@ onUnmounted(() => {
 }
 
 .pane {
-  min-height: 300px;
+  min-height: 270px;
 }
 
 .help {
@@ -372,6 +570,14 @@ onUnmounted(() => {
   border: 1px solid #dee0e3;
 }
 
+.qr-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 260px;
+  color: #8f959e;
+}
+
 .status {
   margin: 0;
   color: #646a73;
@@ -386,6 +592,38 @@ onUnmounted(() => {
 
 .actions.wrap {
   margin-top: 12px;
+}
+
+.success {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 320px;
+  padding: 8px 12px;
+}
+
+.success-title {
+  margin: 0 0 8px;
+  font-size: 30px;
+  font-weight: 600;
+  color: #1a6b2f;
+}
+
+.success-sub {
+  margin: 0 0 8px;
+  font-size: 16px;
+}
+
+.success-note {
+  margin: 0 0 8px;
+  color: #646a73;
+}
+
+.success-tip {
+  margin: 0;
+  color: #8f959e;
+  font-size: 13px;
 }
 
 .field {
@@ -505,6 +743,105 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.debug-panel {
+  margin-top: 16px;
+}
+
+.debug-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.debug-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 6px 16px;
+  margin: 12px 0;
+}
+
+.debug-grid > div {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.debug-grid span {
+  flex: none;
+  width: 88px;
+  color: #8f959e;
+  font-size: 13px;
+}
+
+.debug-grid b {
+  font-weight: 400;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.debug-panel h3 {
+  margin: 16px 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.debug-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 220px;
+  overflow: auto;
+  border: 1px solid #eff0f1;
+  border-radius: 4px;
+}
+
+.debug-log li {
+  display: flex;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #f5f6f7;
+  font-size: 12px;
+}
+
+.debug-log li:last-child {
+  border-bottom: none;
+}
+
+.debug-log em {
+  flex: none;
+  width: 40px;
+  font-style: normal;
+  color: #8f959e;
+}
+
+.mono {
+  font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+.debug-json {
+  margin: 0;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  background: #f7f8fa;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
+.caption {
+  margin: 0;
+  color: #8f959e;
+  font-size: 12px;
+}
+
 .notice {
   margin: 16px 0 0;
   padding: 8px 12px;
@@ -524,7 +861,7 @@ onUnmounted(() => {
 }
 
 .footer {
-  margin-top: 24px;
+  margin-top: 20px;
   color: #8f959e;
   font-size: 12px;
 }
