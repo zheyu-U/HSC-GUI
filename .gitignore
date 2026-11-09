@@ -1,0 +1,24 @@
+# 计划与进度（本地工作文件，不入库）
+plan.md
+todos/
+
+# 本地缓存与临时目录（上游 tarball、脚手架）
+.cache/
+.scaffold/
+
+# 运行状态（凭据/cookie/日志，永不入库）
+state/
+
+# 构建产物
+build/bin/
+frontend/dist/*
+!frontend/dist/gitkeep
+frontend/node_modules/
+frontend/package.json.md5
+node_modules/
+*.exe
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
