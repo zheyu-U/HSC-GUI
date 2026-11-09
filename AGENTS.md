@@ -94,9 +94,11 @@ GUI 直接读写与上游 CLI **完全相同**的 `state/` 布局，加密凭据
 ## 构建
 
 ```bash
-wails build                 # 单文件 exe（Wails v2.17.1）
-wails dev                   # 开发模式
+wails build                 # 单文件 exe（Wails v2.17.1，release 模式）
+wails build -tags debug -o hsc-gui-debug.exe   # debug 模式：额外调试面板与调试日志
+wails dev                   # 开发模式（release 界面；加 -tags debug 为 debug 界面）
 go build ./... && go vet ./... && go test ./...   # 后端检查
+go build -tags debug ./... && go vet -tags debug ./...   # debug 构建检查
 cd frontend && npm.cmd install && npm.cmd run build   # 前端构建
 
 # 同步上游（本机执行策略禁止直接跑 .ps1）
@@ -106,6 +108,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-upstream.ps
 $env:HSC_CLI_BIN = "<path>\hsc.exe"
 go test ./internal/hsc -run TestCredentialInteropWithCLI -v
 ```
+
+模式差异：release 界面只显示关键信息（账号、登录状态、是否记住账号、课程配置），
+不显示 state 路径、cookie 数、原始 JSON；debug 额外显示调试面板、绑定调用日志和原始数据。
+构建模式由构建标签 `debug` 决定（`app_mode_debug.go` / `app_mode_release.go`），
+前端启动时通过 `AppMode` 绑定判断。
 
 注意：`scripts/*.ps1` 必须保存为 **UTF-8 带 BOM**，否则 Windows PowerShell 5.1
 会按 ANSI 解析中文注释而报语法错误；本机没有 PowerShell 7（`pwsh`）。

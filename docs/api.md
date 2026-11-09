@@ -10,6 +10,7 @@
 - state 目录与 hsc CLI 相同：开发模式下是项目根目录，打包后是 exe 所在目录；
   见上游 `go/config.go` 的 `stateLayout`，路径一律走 `statePath(name)`
 - 文案朴素：中文、无 emoji、无符号；报错给出下一步动作
+- 构建模式：默认 release；`-tags debug` 构建 debug。前端先调 `AppMode`，debug 构建才显示调试面板与调试信息
 
 ## 方法
 
@@ -97,6 +98,47 @@
 | --- | --- | --- |
 | removed | string[] | 实际删除的文件名，如 `cookies.json`、`cred.enc.json` |
 | message | string | 结果说明，可直接展示 |
+
+### AppMode() -> AppModeInfo
+
+返回构建模式与版本。前端在启动时调用一次，决定显示 release 还是 debug 界面。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| mode | string | `release` 或 `debug` |
+| debug | boolean | 是否 debug 构建 |
+| version | string | 应用版本号 |
+
+### DebugInfo() -> DebugInfo
+
+运行环境信息，仅 debug 构建可用；release 构建调用会 reject。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| mode | string | 固定 `debug` |
+| stateDir | string | 当前 state 目录绝对路径 |
+| cwd | string | 当前工作目录 |
+| exePath | string | 可执行文件路径 |
+| goVersion | string | Go 运行时版本 |
+| os / arch | string | 操作系统与架构 |
+| cookieCount | number | 当前 cookie 条数 |
+| loggedIn | boolean | 本地是否存在登录态 |
+
+### DebugLog() -> DebugEntry[]
+
+最近的绑定调用与事件日志，仅 debug 构建可用；release 构建返回空数组。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| time | string | `HH:MM:SS` |
+| kind | string | `启动` `调用` `结果` `错误` `事件` |
+| message | string | 日志内容 |
+
+最多保留最近 300 条，不写入磁盘。
+
+### ClearDebugLog() -> void
+
+清空调试日志，仅 debug 构建有效。
 
 ## 事件
 
