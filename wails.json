@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "hsc-gui",
+  "outputfilename": "hsc-gui",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "zheyu-U",
+    "email": "140892404+zheyu-U@users.noreply.github.com"
+  }
+}
