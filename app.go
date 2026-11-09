@@ -3,15 +3,51 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
+	goruntime "runtime"
+	"sync"
+	"time"
 
 	"hsc-gui/internal/hsc"
 
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+const appVersion = "0.2.0"
+
 // App 是暴露给前端的绑定对象，方法清单同步维护在 docs/api.md。
 type App struct {
 	ctx context.Context
+
+	debugMu  sync.Mutex
+	debugLog []DebugEntry
+}
+
+// AppModeInfo 构建模式与版本信息。
+type AppModeInfo struct {
+	Mode    string `json:"mode"`
+	Debug   bool   `json:"debug"`
+	Version string `json:"version"`
+}
+
+// DebugInfo 调试面板用的运行环境信息。
+type DebugInfo struct {
+	Mode        string `json:"mode"`
+	StateDir    string `json:"stateDir"`
+	Cwd         string `json:"cwd"`
+	ExePath     string `json:"exePath"`
+	GoVersion   string `json:"goVersion"`
+	OS          string `json:"os"`
+	Arch        string `json:"arch"`
+	CookieCount int    `json:"cookieCount"`
+	LoggedIn    bool   `json:"loggedIn"`
+}
+
+// DebugEntry 一条调试日志。
+type DebugEntry struct {
+	Time    string `json:"time"`
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
 }
 
 // NewApp 创建 App。
@@ -23,43 +59,162 @@ func NewApp() *App {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	if err := hsc.InitState(); err != nil {
+		a.record("错误", "初始化 state 目录失败: "+err.Error())
 		fmt.Println("初始化 state 目录失败:", err)
+		return
 	}
+	a.record("启动", "state 目录: "+hsc.StateDir())
+}
+
+// record 只在 debug 构建里记录调试日志，release 不占内存也不暴露内部信息。
+func (a *App) record(kind, message string) {
+	if !debugBuild {
+		return
+	}
+	a.debugMu.Lock()
+	defer a.debugMu.Unlock()
+	a.debugLog = append(a.debugLog, DebugEntry{
+		Time:    time.Now().Format("15:04:05"),
+		Kind:    kind,
+		Message: message,
+	})
+	if len(a.debugLog) > 300 {
+		a.debugLog = a.debugLog[len(a.debugLog)-300:]
+	}
+}
+
+// AppMode 返回当前构建模式与版本，前端据此决定显示 release 还是 debug 界面。
+func (a *App) AppMode() AppModeInfo {
+	mode := "release"
+	if debugBuild {
+		mode = "debug"
+	}
+	return AppModeInfo{Mode: mode, Debug: debugBuild, Version: appVersion}
+}
+
+// DebugInfo 返回运行环境信息，仅 debug 构建使用。
+func (a *App) DebugInfo() (DebugInfo, error) {
+	if !debugBuild {
+		return DebugInfo{}, fmt.Errorf("release 构建不提供调试信息")
+	}
+	mode := "debug"
+	info := DebugInfo{
+		Mode:      mode,
+		StateDir:  hsc.StateDir(),
+		GoVersion: goruntime.Version(),
+		OS:        goruntime.GOOS,
+		Arch:      goruntime.GOARCH,
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		info.Cwd = cwd
+	}
+	if exe, err := os.Executable(); err == nil {
+		info.ExePath = exe
+	}
+	if s, err := hsc.SessionStatus(); err == nil {
+		info.CookieCount = s.CookieCount
+		info.LoggedIn = s.LoggedIn
+	}
+	return info, nil
+}
+
+// DebugLog 返回最近的绑定调用与事件记录，仅 debug 构建使用。
+func (a *App) DebugLog() []DebugEntry {
+	if !debugBuild {
+		return nil
+	}
+	a.debugMu.Lock()
+	defer a.debugMu.Unlock()
+	out := make([]DebugEntry, len(a.debugLog))
+	copy(out, a.debugLog)
+	return out
+}
+
+// ClearDebugLog 清空调试日志。
+func (a *App) ClearDebugLog() {
+	if !debugBuild {
+		return
+	}
+	a.debugMu.Lock()
+	a.debugLog = nil
+	a.debugMu.Unlock()
 }
 
 // StartQRLogin 生成二维码并开始后台轮询，进度经 login:qr 事件推送。
 func (a *App) StartQRLogin() (hsc.QRLoginResult, error) {
-	return hsc.StartQRLogin(func(ev hsc.LoginEvent) {
+	a.record("调用", "StartQRLogin")
+	res, err := hsc.StartQRLogin(func(ev hsc.LoginEvent) {
+		a.record("事件", ev.State+" "+ev.Message)
 		runtime.EventsEmit(a.ctx, "login:qr", ev)
 	})
+	if err != nil {
+		a.record("错误", "StartQRLogin: "+err.Error())
+		return res, err
+	}
+	a.record("结果", "二维码已生成")
+	return res, nil
 }
 
 // CancelQRLogin 取消扫码轮询。
 func (a *App) CancelQRLogin() {
+	a.record("调用", "CancelQRLogin")
 	hsc.CancelQRLogin()
 }
 
 // StartCaptcha 取一张验证码并返回自动识别建议值。
 func (a *App) StartCaptcha() (hsc.CaptchaView, error) {
-	return hsc.StartCaptcha()
+	a.record("调用", "StartCaptcha")
+	res, err := hsc.StartCaptcha()
+	if err != nil {
+		a.record("错误", "StartCaptcha: "+err.Error())
+		return res, err
+	}
+	a.record("结果", fmt.Sprintf("验证码已识别: 建议 %s，置信度 %.2f，字符数 %d",
+		res.SuggestedCode, res.Confidence, res.Count))
+	return res, nil
 }
 
 // LoginPassword 提交账号密码与验证码。
 func (a *App) LoginPassword(username, password, code string) (hsc.LoginResult, error) {
-	return hsc.LoginPassword(username, password, code)
+	a.record("调用", "LoginPassword 账号 "+username)
+	res, err := hsc.LoginPassword(username, password, code)
+	if err != nil {
+		a.record("错误", "LoginPassword: "+err.Error())
+		return res, err
+	}
+	a.record("结果", "LoginPassword: "+res.Message)
+	return res, nil
 }
 
 // SessionStatus 返回本地会话与凭据状态。
 func (a *App) SessionStatus() (hsc.SessionInfo, error) {
-	return hsc.SessionStatus()
+	res, err := hsc.SessionStatus()
+	if err != nil {
+		a.record("错误", "SessionStatus: "+err.Error())
+	}
+	return res, err
 }
 
 // CheckSession 对站点做一次登录态校验（需要已配置课程）。
 func (a *App) CheckSession() (hsc.CheckResult, error) {
-	return hsc.CheckSession()
+	a.record("调用", "CheckSession")
+	res, err := hsc.CheckSession()
+	if err != nil {
+		a.record("错误", "CheckSession: "+err.Error())
+		return res, err
+	}
+	a.record("结果", "CheckSession: "+res.Message)
+	return res, nil
 }
 
 // Logout 清除登录态；all 为 true 时连凭据一起清。
 func (a *App) Logout(all bool) (hsc.LogoutResult, error) {
-	return hsc.Logout(all)
+	a.record("调用", fmt.Sprintf("Logout all=%v", all))
+	res, err := hsc.Logout(all)
+	if err != nil {
+		a.record("错误", "Logout: "+err.Error())
+		return res, err
+	}
+	a.record("结果", "Logout: "+res.Message)
+	return res, nil
 }
