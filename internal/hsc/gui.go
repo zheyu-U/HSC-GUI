@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -435,6 +436,215 @@ func Logout(all bool) (LogoutResult, error) {
 		out.Message = "已清除登录态和已保存的凭据"
 	default:
 		out.Message = "已清除登录态，凭据保留，下次账密登录可直接使用"
+	}
+	return out, nil
+}
+
+// ---- 课程与任务点 ----
+
+// CourseChapter 章节视图，标题可能为空（上游章节接口不返回标题）。
+type CourseChapter struct {
+	Index        int    `json:"index"`
+	ID           string `json:"id"`
+	Title        string `json:"title"`
+	Videos       int    `json:"videos"`
+	VideosPassed int    `json:"videosPassed"`
+	Works        int    `json:"works"`
+}
+
+// CourseVideo 视频任务点视图。
+type CourseVideo struct {
+	ChapterIndex int     `json:"chapterIndex"`
+	ChapterID    string  `json:"chapterId"`
+	Title        string  `json:"title"`
+	Duration     int     `json:"duration"`
+	IsPassed     bool    `json:"isPassed"`
+	SpeedLimited bool    `json:"speedLimited"`
+	PlayTime     float64 `json:"playTime"`
+}
+
+// CourseWork 作业任务点视图。
+type CourseWork struct {
+	ChapterIndex int    `json:"chapterIndex"`
+	ChapterID    string `json:"chapterId"`
+	Title        string `json:"title"`
+	WorkID       string `json:"workId"`
+	WorkType     string `json:"workType"`
+}
+
+// CourseSummary 课程结构概览。
+type CourseSummary struct {
+	Chapters      int     `json:"chapters"`
+	Videos        int     `json:"videos"`
+	VideosPassed  int     `json:"videosPassed"`
+	Works         int     `json:"works"`
+	DurationHours float64 `json:"durationHours"`
+	SpeedLimited  int     `json:"speedLimited"`
+	FetchedAt     string  `json:"fetchedAt"`
+}
+
+// CourseDetail 课程页需要的全部数据。
+type CourseDetail struct {
+	HasCourse bool            `json:"hasCourse"`
+	Stale     bool            `json:"stale"`
+	Target    Target          `json:"target"`
+	Summary   CourseSummary   `json:"summary"`
+	Chapters  []CourseChapter `json:"chapters"`
+	Videos    []CourseVideo   `json:"videos"`
+	Works     []CourseWork    `json:"works"`
+	Message   string          `json:"message"`
+}
+
+// ListCourses 获取当前账号的课程列表；refresh 为 true 时重新拉取，不用缓存。
+func ListCourses(refresh bool) ([]CourseItem, error) {
+	if err := InitState(); err != nil {
+		return nil, err
+	}
+	c := newClient(NewJar())
+	if err := loadSession(c); err != nil {
+		return nil, fmt.Errorf("未登录，先完成登录再获取课程列表")
+	}
+	list, err := loadCourseList(c, refresh)
+	if err != nil {
+		return nil, fmt.Errorf("获取课程列表失败: %w", err)
+	}
+	if len(list) == 0 {
+		return nil, fmt.Errorf("账号下没有课程，或平台返回的列表为空")
+	}
+	return list, nil
+}
+
+// SelectCourse 按列表序号选课：写 state/course/target.json，必要时重抓课程结构。
+func SelectCourse(index int) (CourseDetail, error) {
+	if err := InitState(); err != nil {
+		return CourseDetail{}, err
+	}
+	c := newClient(NewJar())
+	if err := loadSession(c); err != nil {
+		return CourseDetail{}, fmt.Errorf("未登录，先完成登录再选择课程")
+	}
+	if _, err := switchCourseOpt(c, index, false); err != nil {
+		return CourseDetail{}, fmt.Errorf("选择课程失败: %w", err)
+	}
+	return buildCourseDetail()
+}
+
+// RefreshCourse 对当前课程重新抓取章节与任务点，写入 state/course/course.json。
+func RefreshCourse() (CourseDetail, error) {
+	if err := InitState(); err != nil {
+		return CourseDetail{}, err
+	}
+	t, err := loadTarget()
+	if err != nil {
+		return CourseDetail{}, fmt.Errorf("还没有选择课程，先在课程列表里选一门")
+	}
+	c := newClient(NewJar())
+	if err := loadSession(c); err != nil {
+		return CourseDetail{}, fmt.Errorf("未登录，先完成登录再抓取课程结构")
+	}
+	if _, err := crawlCourse(c, t); err != nil {
+		return CourseDetail{}, fmt.Errorf("抓取课程结构失败: %w", err)
+	}
+	return buildCourseDetail()
+}
+
+// GetCourseDetail 读取本地缓存，不发起网络请求。
+func GetCourseDetail() (CourseDetail, error) {
+	if err := InitState(); err != nil {
+		return CourseDetail{}, err
+	}
+	return buildCourseDetail()
+}
+
+// buildCourseDetail 把 target + course.json 转成前端使用的视图。
+func buildCourseDetail() (CourseDetail, error) {
+	var out CourseDetail
+	t, err := loadTarget()
+	if err != nil {
+		out.Message = "还没有选择课程。先获取课程列表，选一门课，再抓取课程结构。"
+		return out, nil
+	}
+	out.Target = t
+
+	var snap CourseSnapshot
+	if err := readJSON(statePath("course.json"), &snap); err != nil {
+		out.Message = "已选择课程，但还没有抓取课程结构。点“抓取课程结构”从平台拉取章节和任务点。"
+		return out, nil
+	}
+	out.HasCourse = true
+	out.Stale = snap.Target.CourseID != "" && snap.Target.CourseID != t.CourseID
+
+	chapterIndex := make(map[string]int, len(snap.Chapters))
+	chapters := make([]CourseChapter, 0, len(snap.Chapters))
+	for i, ch := range snap.Chapters {
+		chapterIndex[ch.KnowledgeID] = i + 1
+		chapters = append(chapters, CourseChapter{
+			Index: i + 1,
+			ID:    ch.KnowledgeID,
+			Title: ch.Title,
+		})
+	}
+
+	totalDuration := 0
+	passed := 0
+	limited := 0
+	for _, v := range snap.Videos {
+		ci := chapterIndex[v.ChapterID]
+		isLimited := speedLimited(v.OtherInfo)
+		out.Videos = append(out.Videos, CourseVideo{
+			ChapterIndex: ci,
+			ChapterID:    v.ChapterID,
+			Title:        v.Title,
+			Duration:     v.AttDuration,
+			IsPassed:     v.IsPassed,
+			SpeedLimited: isLimited,
+			PlayTime:     v.PlayTime,
+		})
+		totalDuration += v.AttDuration
+		if v.IsPassed {
+			passed++
+		}
+		if isLimited {
+			limited++
+		}
+		if ci >= 1 && ci <= len(chapters) {
+			chapters[ci-1].Videos++
+			if v.IsPassed {
+				chapters[ci-1].VideosPassed++
+			}
+		}
+	}
+	for _, w := range snap.Works {
+		ci := chapterIndex[w.ChapterID]
+		out.Works = append(out.Works, CourseWork{
+			ChapterIndex: ci,
+			ChapterID:    w.ChapterID,
+			Title:        w.Title,
+			WorkID:       w.WorkID,
+			WorkType:     w.WorkType,
+		})
+		if ci >= 1 && ci <= len(chapters) {
+			chapters[ci-1].Works++
+		}
+	}
+	out.Chapters = chapters
+	out.Summary = CourseSummary{
+		Chapters:      len(snap.Chapters),
+		Videos:        len(snap.Videos),
+		VideosPassed:  passed,
+		Works:         len(snap.Works),
+		DurationHours: math.Round(float64(totalDuration)/3600*100) / 100,
+		SpeedLimited:  limited,
+		FetchedAt:     snap.FetchedAt,
+	}
+
+	switch {
+	case len(snap.Videos) == 0 && len(snap.Works) == 0:
+		out.Message = "课程结构里没有任务点，可能页面结构变了，可以重新抓取。"
+	case out.Stale:
+		out.Message = "课程结构缓存属于另一门课，点“抓取课程结构”重新拉取。"
+	default:
+		out.Message = "课程结构已加载。"
 	}
 	return out, nil
 }

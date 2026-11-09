@@ -13,7 +13,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-const appVersion = "0.2.0"
+const appVersion = "0.3.0"
 
 // App 是暴露给前端的绑定对象，方法清单同步维护在 docs/api.md。
 type App struct {
@@ -217,4 +217,50 @@ func (a *App) Logout(all bool) (hsc.LogoutResult, error) {
 	}
 	a.record("结果", "Logout: "+res.Message)
 	return res, nil
+}
+
+// ListCourses 获取当前账号的课程列表；refresh 为 true 时重新拉取。
+func (a *App) ListCourses(refresh bool) ([]hsc.CourseItem, error) {
+	a.record("调用", fmt.Sprintf("ListCourses refresh=%v", refresh))
+	list, err := hsc.ListCourses(refresh)
+	if err != nil {
+		a.record("错误", "ListCourses: "+err.Error())
+		return nil, err
+	}
+	a.record("结果", fmt.Sprintf("课程列表 %d 门", len(list)))
+	return list, nil
+}
+
+// SelectCourse 按序号选择课程，必要时抓取课程结构。
+func (a *App) SelectCourse(index int) (hsc.CourseDetail, error) {
+	a.record("调用", fmt.Sprintf("SelectCourse index=%d", index))
+	detail, err := hsc.SelectCourse(index)
+	if err != nil {
+		a.record("错误", "SelectCourse: "+err.Error())
+		return detail, err
+	}
+	a.record("结果", "已选择课程: "+detail.Target.Name)
+	return detail, nil
+}
+
+// RefreshCourse 重新抓取当前课程的章节与任务点。
+func (a *App) RefreshCourse() (hsc.CourseDetail, error) {
+	a.record("调用", "RefreshCourse")
+	detail, err := hsc.RefreshCourse()
+	if err != nil {
+		a.record("错误", "RefreshCourse: "+err.Error())
+		return detail, err
+	}
+	a.record("结果", fmt.Sprintf("课程结构: %d 章节 / %d 视频 / %d 作业",
+		detail.Summary.Chapters, detail.Summary.Videos, detail.Summary.Works))
+	return detail, nil
+}
+
+// GetCourseDetail 读取本地课程结构缓存，不发起网络请求。
+func (a *App) GetCourseDetail() (hsc.CourseDetail, error) {
+	detail, err := hsc.GetCourseDetail()
+	if err != nil {
+		a.record("错误", "GetCourseDetail: "+err.Error())
+	}
+	return detail, err
 }

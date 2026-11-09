@@ -26,12 +26,28 @@ export function DebugLog() {
   return window['go']['main']['App']['DebugLog']();
 }
 
+export function GetCourseDetail() {
+  return window['go']['main']['App']['GetCourseDetail']();
+}
+
+export function ListCourses(arg1) {
+  return window['go']['main']['App']['ListCourses'](arg1);
+}
+
 export function LoginPassword(arg1, arg2, arg3) {
   return window['go']['main']['App']['LoginPassword'](arg1, arg2, arg3);
 }
 
 export function Logout(arg1) {
   return window['go']['main']['App']['Logout'](arg1);
+}
+
+export function RefreshCourse() {
+  return window['go']['main']['App']['RefreshCourse']();
+}
+
+export function SelectCourse(arg1) {
+  return window['go']['main']['App']['SelectCourse'](arg1);
 }
 
 export function SessionStatus() {

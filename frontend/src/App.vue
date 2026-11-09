@@ -7,8 +7,12 @@ import {
   ClearDebugLog,
   DebugInfo,
   DebugLog,
+  GetCourseDetail,
+  ListCourses,
   LoginPassword,
   Logout,
+  RefreshCourse,
+  SelectCourse,
   SessionStatus,
   StartCaptcha,
   StartQRLogin,
@@ -42,6 +46,12 @@ const logoutBusy = ref(false)
 const checkMessage = ref('')
 const logoutAll = ref(false)
 
+const courseList = ref([])
+const courseDetail = ref(null)
+const courseLoading = ref(false)
+const courseBusy = ref(false)
+const courseError = ref('')
+
 const debugInfo = ref(null)
 const debugLog = ref([])
 const debugBusy = ref(false)
@@ -49,6 +59,34 @@ const debugBusy = ref(false)
 const loggedIn = computed(() => !!(session.value && session.value.loggedIn))
 const account = computed(() => (session.value && session.value.account) || '')
 const prettySession = computed(() => (session.value ? JSON.stringify(session.value, null, 2) : ''))
+const currentCourseID = computed(() => {
+  if (!courseDetail.value || !courseDetail.value.target) {
+    return ''
+  }
+  return courseDetail.value.target.courseId || ''
+})
+const videosByChapter = computed(() => {
+  const map = {}
+  const list = (courseDetail.value && courseDetail.value.videos) || []
+  for (const item of list) {
+    if (!map[item.chapterId]) {
+      map[item.chapterId] = []
+    }
+    map[item.chapterId].push(item)
+  }
+  return map
+})
+const worksByChapter = computed(() => {
+  const map = {}
+  const list = (courseDetail.value && courseDetail.value.works) || []
+  for (const item of list) {
+    if (!map[item.chapterId]) {
+      map[item.chapterId] = []
+    }
+    map[item.chapterId].push(item)
+  }
+  return map
+})
 
 function friendly(e) {
   return String(e).replace(/^Error:\s*/, '')
@@ -184,6 +222,7 @@ async function handleLoginSuccess(message) {
   view.value = 'success'
   setNotice(message, 'ok')
   await refreshSession()
+  await loadCourseDetail()
   refreshDebug()
 }
 
@@ -256,6 +295,9 @@ async function doLogout() {
     checkMessage.value = ''
     setNotice(res.message, 'ok')
     await refreshSession()
+    courseList.value = []
+    courseDetail.value = null
+    courseError.value = ''
     if (!loggedIn.value) {
       generateQr()
     }
@@ -274,14 +316,90 @@ async function bootstrap() {
     // AppMode 不可用时按 release 处理，保证界面能显示
   }
   await refreshSession()
-  if (!loggedIn.value) {
+  if (loggedIn.value) {
+    loadCourseDetail()
+  } else {
     generateQr()
   }
   refreshDebug()
 }
 
-let offQr = null
+async function loadCourseDetail() {
+  if (!loggedIn.value) {
+    courseDetail.value = null
+    return
+  }
+  try {
+    courseDetail.value = await GetCourseDetail()
+  } catch (e) {
+    courseError.value = friendly(e)
+  }
+}
 
+async function loadCourses(refresh) {
+  if (!loggedIn.value) {
+    return
+  }
+  courseLoading.value = true
+  courseError.value = ''
+  try {
+    courseList.value = await ListCourses(refresh !== false)
+  } catch (e) {
+    courseError.value = friendly(e)
+  } finally {
+    courseLoading.value = false
+    refreshDebug()
+  }
+}
+
+async function selectCourse(index) {
+  courseBusy.value = true
+  courseError.value = ''
+  try {
+    const detail = await SelectCourse(index)
+    courseDetail.value = detail
+    setNotice('已切换到课程 ' + (detail.target.name || detail.target.courseId), 'ok')
+    await refreshSession()
+  } catch (e) {
+    courseError.value = friendly(e)
+  } finally {
+    courseBusy.value = false
+    refreshDebug()
+  }
+}
+
+async function refreshCourse() {
+  courseBusy.value = true
+  courseError.value = ''
+  try {
+    courseDetail.value = await RefreshCourse()
+    setNotice('课程结构已更新', 'ok')
+  } catch (e) {
+    courseError.value = friendly(e)
+  } finally {
+    courseBusy.value = false
+    refreshDebug()
+  }
+}
+
+function isCurrent(course) {
+  return currentCourseID.value && course.courseId === currentCourseID.value
+}
+
+function formatDuration(seconds) {
+  const value = Number(seconds) || 0
+  if (value <= 0) {
+    return '时长未知'
+  }
+  const hours = Math.floor(value / 3600)
+  const minutes = Math.round((value % 3600) / 60)
+  if (hours > 0) {
+    return hours + ' 小时 ' + minutes + ' 分钟'
+  }
+  return minutes + ' 分钟'
+}
+
+let offQr = null
 watch(tab, (val) => {
   if (val === 'pw' && !captchaImage.value) {
     refreshCaptcha()
@@ -419,6 +537,70 @@ onUnmounted(() => {
         <p v-if="checkMessage" class="status">{{ checkMessage }}</p>
       </aside>
     </main>
+
+    <section v-if="loggedIn" class="card course-card">
+      <div class="course-head">
+        <h2>我的课程</h2>
+        <div class="actions">
+          <button @click="loadCourses(true)" :disabled="courseLoading || courseBusy">
+            {{ courseLoading ? '获取中' : '获取课程列表' }}
+          </button>
+          <button v-if="courseDetail && courseDetail.hasCourse" @click="refreshCourse" :disabled="courseBusy">
+            {{ courseBusy ? '抓取中' : '抓取课程结构' }}
+          </button>
+        </div>
+      </div>
+
+      <p v-if="courseDetail" class="status-line">{{ courseDetail.message }}</p>
+      <p v-if="courseError" class="inline-error">{{ courseError }}</p>
+
+      <div v-if="courseList.length" class="course-list">
+        <div v-for="item in courseList" :key="item.courseId" class="course-row">
+          <span class="course-index">{{ item.index }}</span>
+          <span class="course-name">{{ item.name || '未命名课程' }}</span>
+          <span class="course-teacher">{{ item.teacher }}</span>
+          <span v-if="isCurrent(item)" class="course-current">当前</span>
+          <button @click="selectCourse(item.index)" :disabled="courseBusy || courseLoading">选择</button>
+        </div>
+      </div>
+
+      <template v-if="courseDetail && courseDetail.hasCourse">
+        <div class="course-summary">
+          <span>章节 <b>{{ courseDetail.summary.chapters }}</b></span>
+          <span>视频 <b>{{ courseDetail.summary.videosPassed }}/{{ courseDetail.summary.videos }}</b></span>
+          <span>作业 <b>{{ courseDetail.summary.works }}</b></span>
+          <span>总时长 <b>{{ courseDetail.summary.durationHours }}</b> 小时</span>
+          <span v-if="courseDetail.summary.speedLimited">限 1 倍速 <b>{{ courseDetail.summary.speedLimited }}</b> 个</span>
+          <span v-if="courseDetail.stale" class="warn-text">缓存属于另一门课</span>
+        </div>
+
+        <div class="chapter-list">
+          <details v-for="ch in courseDetail.chapters" :key="ch.id" class="chapter" :open="ch.index <= 2">
+            <summary>
+              <span class="chapter-name">{{ ch.title || ('章节 ' + ch.index) }}</span>
+              <span class="muted">视频 {{ ch.videosPassed }}/{{ ch.videos }}，作业 {{ ch.works }}</span>
+            </summary>
+            <ul class="task-list">
+              <li v-for="(v, index) in videosByChapter[ch.id] || []" :key="'v' + ch.id + index">
+                <span class="task-tag">视频</span>
+                <span class="task-title">{{ v.title || '未命名视频' }}</span>
+                <span class="muted">{{ formatDuration(v.duration) }}</span>
+                <span v-if="v.isPassed" class="ok-text">已完成</span>
+                <span v-else class="muted">未完成</span>
+                <span v-if="v.speedLimited" class="muted">限 1 倍速</span>
+              </li>
+              <li v-for="(w, index) in worksByChapter[ch.id] || []" :key="'w' + ch.id + index">
+                <span class="task-tag">作业</span>
+                <span class="task-title">{{ w.title || '未命名作业' }}</span>
+              </li>
+              <li v-if="!((videosByChapter[ch.id] || []).length || (worksByChapter[ch.id] || []).length)" class="muted">
+                本章没有可展示的任务点
+              </li>
+            </ul>
+          </details>
+        </div>
+      </template>
+    </section>
 
     <section v-if="mode.debug" class="card debug-panel">
       <div class="debug-head">
@@ -840,6 +1022,164 @@ onUnmounted(() => {
   margin: 0;
   color: #8f959e;
   font-size: 12px;
+}
+
+.course-card {
+  margin-top: 16px;
+}
+
+.course-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.course-head h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.course-list {
+  border: 1px solid #eff0f1;
+  border-radius: 4px;
+  margin: 8px 0;
+}
+
+.course-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  border-bottom: 1px solid #f5f6f7;
+  font-size: 13px;
+}
+
+.course-row:last-child {
+  border-bottom: none;
+}
+
+.course-index {
+  flex: none;
+  width: 24px;
+  color: #8f959e;
+}
+
+.course-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.course-teacher {
+  flex: none;
+  width: 100px;
+  color: #646a73;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.course-current {
+  flex: none;
+  font-size: 12px;
+  color: #3370ff;
+}
+
+.course-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin: 10px 0;
+  color: #646a73;
+  font-size: 13px;
+}
+
+.course-summary b {
+  color: #1f2329;
+  font-weight: 600;
+}
+
+.chapter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.chapter {
+  border: 1px solid #eff0f1;
+  border-radius: 4px;
+  padding: 6px 10px;
+}
+
+.chapter summary {
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.chapter-name {
+  font-weight: 500;
+}
+
+.task-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.task-list li {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 3px 0;
+  font-size: 13px;
+}
+
+.task-tag {
+  flex: none;
+  font-size: 12px;
+  color: #8f959e;
+  border: 1px solid #dee0e3;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+.task-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.muted {
+  color: #8f959e;
+}
+
+.ok-text {
+  color: #1a6b2f;
+}
+
+.warn-text {
+  color: #a35c00;
+}
+
+.inline-error {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  background: #fde2e2;
+  color: #a61b1b;
+  font-size: 13px;
 }
 
 .notice {

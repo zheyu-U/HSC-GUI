@@ -15,9 +15,17 @@ export function DebugInfo():Promise<main.DebugInfo>;
 
 export function DebugLog():Promise<Array<main.DebugEntry>>;
 
+export function GetCourseDetail():Promise<hsc.CourseDetail>;
+
+export function ListCourses(arg1:boolean):Promise<Array<hsc.CourseItem>>;
+
 export function LoginPassword(arg1:string,arg2:string,arg3:string):Promise<hsc.LoginResult>;
 
 export function Logout(arg1:boolean):Promise<hsc.LogoutResult>;
+
+export function RefreshCourse():Promise<hsc.CourseDetail>;
+
+export function SelectCourse(arg1:number):Promise<hsc.CourseDetail>;
 
 export function SessionStatus():Promise<hsc.SessionInfo>;
 
