@@ -269,6 +269,7 @@ export namespace hsc {
 	    loggedIn: boolean;
 	    cookieCount: number;
 	    account: string;
+	    accountTail: string;
 	    credSaved: boolean;
 	    credEncrypted: boolean;
 	    hasTarget: boolean;
@@ -284,6 +285,7 @@ export namespace hsc {
 	        this.loggedIn = source["loggedIn"];
 	        this.cookieCount = source["cookieCount"];
 	        this.account = source["account"];
+	        this.accountTail = source["accountTail"];
 	        this.credSaved = source["credSaved"];
 	        this.credEncrypted = source["credEncrypted"];
 	        this.hasTarget = source["hasTarget"];

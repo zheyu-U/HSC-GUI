@@ -315,11 +315,21 @@ type SessionInfo struct {
 	LoggedIn      bool   `json:"loggedIn"`
 	CookieCount   int    `json:"cookieCount"`
 	Account       string `json:"account"`
+	AccountTail   string `json:"accountTail"`
 	CredSaved     bool   `json:"credSaved"`
 	CredEncrypted bool   `json:"credEncrypted"`
 	HasTarget     bool   `json:"hasTarget"`
 	StateDir      string `json:"stateDir"`
 	Message       string `json:"message"`
+}
+
+// tailRunes 取字符串最后 n 个字符，用于顶栏只显示账号尾号。
+func tailRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[len(r)-n:])
 }
 
 // SessionStatus 读取本地登录态与凭据状态。
@@ -338,10 +348,12 @@ func SessionStatus() (SessionInfo, error) {
 		info.CredSaved = true
 		info.CredEncrypted = true
 		info.Account = maskUser(c.Username)
+		info.AccountTail = tailRunes(c.Username, 3)
 	} else if fileExists(statePath(txtCredFile)) {
 		info.CredSaved = true
 		if c, err := loadPlainCreds(); err == nil {
 			info.Account = maskUser(c.Username)
+			info.AccountTail = tailRunes(c.Username, 3)
 		}
 	}
 	if _, ok := loadTargetIfExists(); ok {
