@@ -62,6 +62,26 @@ export namespace hsc {
 	        this.works = source["works"];
 	    }
 	}
+	export class CourseDoc {
+	    chapterIndex: number;
+	    chapterId: string;
+	    title: string;
+	    module: string;
+	    isPassed: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CourseDoc(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.chapterIndex = source["chapterIndex"];
+	        this.chapterId = source["chapterId"];
+	        this.title = source["title"];
+	        this.module = source["module"];
+	        this.isPassed = source["isPassed"];
+	    }
+	}
 	export class CourseWork {
 	    chapterIndex: number;
 	    chapterId: string;
@@ -85,6 +105,7 @@ export namespace hsc {
 	export class CourseVideo {
 	    chapterIndex: number;
 	    chapterId: string;
+	    objectId: string;
 	    title: string;
 	    duration: number;
 	    isPassed: boolean;
@@ -99,6 +120,7 @@ export namespace hsc {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.chapterIndex = source["chapterIndex"];
 	        this.chapterId = source["chapterId"];
+	        this.objectId = source["objectId"];
 	        this.title = source["title"];
 	        this.duration = source["duration"];
 	        this.isPassed = source["isPassed"];
@@ -111,6 +133,8 @@ export namespace hsc {
 	    videos: number;
 	    videosPassed: number;
 	    works: number;
+	    docs: number;
+	    docsPassed: number;
 	    durationHours: number;
 	    speedLimited: number;
 	    fetchedAt: string;
@@ -125,6 +149,8 @@ export namespace hsc {
 	        this.videos = source["videos"];
 	        this.videosPassed = source["videosPassed"];
 	        this.works = source["works"];
+	        this.docs = source["docs"];
+	        this.docsPassed = source["docsPassed"];
 	        this.durationHours = source["durationHours"];
 	        this.speedLimited = source["speedLimited"];
 	        this.fetchedAt = source["fetchedAt"];
@@ -153,11 +179,13 @@ export namespace hsc {
 	export class CourseDetail {
 	    hasCourse: boolean;
 	    stale: boolean;
+	    docScanned: boolean;
 	    target: Target;
 	    summary: CourseSummary;
 	    chapters: CourseChapter[];
 	    videos: CourseVideo[];
 	    works: CourseWork[];
+	    docs: CourseDoc[];
 	    message: string;
 	
 	    static createFrom(source: any = {}) {
@@ -168,11 +196,13 @@ export namespace hsc {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.hasCourse = source["hasCourse"];
 	        this.stale = source["stale"];
+	        this.docScanned = source["docScanned"];
 	        this.target = this.convertValues(source["target"], Target);
 	        this.summary = this.convertValues(source["summary"], CourseSummary);
 	        this.chapters = this.convertValues(source["chapters"], CourseChapter);
 	        this.videos = this.convertValues(source["videos"], CourseVideo);
 	        this.works = this.convertValues(source["works"], CourseWork);
+	        this.docs = this.convertValues(source["docs"], CourseDoc);
 	        this.message = source["message"];
 	    }
 	
@@ -194,6 +224,7 @@ export namespace hsc {
 		    return a;
 		}
 	}
+	
 	export class CourseItem {
 	    index: number;
 	    name: string;
@@ -248,6 +279,22 @@ export namespace hsc {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.removed = source["removed"];
+	        this.message = source["message"];
+	    }
+	}
+	export class PlayStartResult {
+	    running: boolean;
+	    total: number;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new PlayStartResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.running = source["running"];
+	        this.total = source["total"];
 	        this.message = source["message"];
 	    }
 	}

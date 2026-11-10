@@ -2,9 +2,11 @@
 import {computed, onMounted, onUnmounted, ref} from 'vue'
 import {
   AppMode,
+  CancelPlay,
   CancelQRLogin,
   CheckSession,
   ClearDebugLog,
+  CompleteDocs,
   DebugInfo,
   DebugLog,
   GetCourseDetail,
@@ -12,9 +14,11 @@ import {
   LoginPassword,
   Logout,
   RefreshCourse,
+  ScanCourse,
   SelectCourse,
   SessionStatus,
   StartCaptcha,
+  StartPlay,
   StartQRLogin,
 } from '../wailsjs/go/main/App'
 import {EventsOff, EventsOn} from '../wailsjs/runtime/runtime'
@@ -59,6 +63,25 @@ const courseLoading = ref(false)
 const courseBusy = ref(false)
 const courseError = ref('')
 
+const docBusy = ref(false)
+const playRunning = ref(false)
+const playSpeed = ref(1)
+const playState = ref({
+  state: '',
+  message: '',
+  objectId: '',
+  title: '',
+  index: 0,
+  total: 0,
+  percent: 0,
+  played: 0,
+  duration: 0,
+  speedLimited: false,
+  ok: 0,
+  fail: 0,
+  skipped: 0,
+})
+
 const debugInfo = ref(null)
 const debugLog = ref([])
 const debugBusy = ref(false)
@@ -102,6 +125,19 @@ const worksByChapter = computed(() => {
   }
   return map
 })
+const unpassedVideos = computed(() => {
+  const list = (courseDetail.value && courseDetail.value.videos) || []
+  return list.filter((v) => !v.isPassed)
+})
+const docScanned = computed(() => !!(courseDetail.value && courseDetail.value.docScanned))
+const docUnpassed = computed(() => {
+  const list = (courseDetail.value && courseDetail.value.docs) || []
+  return list.filter((d) => !d.isPassed).length
+})
+const docPassed = computed(() => {
+  const list = (courseDetail.value && courseDetail.value.docs) || []
+  return list.filter((d) => d.isPassed).length
+})
 const pageTitle = computed(() => {
   if (page.value === 'login') {
     if (view.value === 'success') {
@@ -137,6 +173,24 @@ function friendly(e) {
 function setNotice(message, kind) {
   notice.value = message || ''
   noticeKind.value = kind || 'info'
+}
+
+function emptyPlayState() {
+  return {
+    state: '',
+    message: '',
+    objectId: '',
+    title: '',
+    index: 0,
+    total: 0,
+    percent: 0,
+    played: 0,
+    duration: 0,
+    speedLimited: false,
+    ok: 0,
+    fail: 0,
+    skipped: 0,
+  }
 }
 
 function closeMenu() {
@@ -367,6 +421,15 @@ async function checkSession() {
 
 async function doLogout() {
   closeMenu()
+  if (playRunning.value) {
+    try {
+      await CancelPlay()
+    } catch (e) {
+      // 停止播放失败时继续退出，后台会在下一次上报后自行结束
+    }
+  }
+  playRunning.value = false
+  playState.value = emptyPlayState()
   try {
     const res = await Logout(false)
     view.value = 'login'
@@ -421,6 +484,7 @@ async function selectCourse(index) {
   try {
     const detail = await SelectCourse(index)
     courseDetail.value = detail
+    playState.value = emptyPlayState()
     setNotice('已切换到课程 ' + (detail.target.name || detail.target.courseId), 'ok')
     await refreshSession()
   } catch (e) {
@@ -449,6 +513,95 @@ function isCurrent(course) {
   return currentCourseID.value && course.courseId === currentCourseID.value
 }
 
+async function startPlay(objectID) {
+  if (playRunning.value) {
+    return
+  }
+  setNotice('')
+  playState.value = emptyPlayState()
+  try {
+    const res = await StartPlay(objectID || '', Number(playSpeed.value) || 1)
+    playRunning.value = true
+    if (!playState.value.state) {
+      playState.value = {
+        state: 'starting',
+        message: res.message || '开始播放',
+        objectId: objectID || '',
+        title: '',
+        index: 0,
+        total: res.total || 0,
+        percent: 0,
+        played: 0,
+        duration: 0,
+        speedLimited: false,
+        ok: 0,
+        fail: 0,
+        skipped: 0,
+      }
+    }
+  } catch (e) {
+    playRunning.value = false
+    setNotice(friendly(e), 'error')
+  }
+}
+
+async function stopPlay() {
+  try {
+    await CancelPlay()
+  } catch (e) {
+    setNotice(friendly(e), 'error')
+  }
+}
+
+function onPlayEvent(ev) {
+  if (!ev) {
+    return
+  }
+  playState.value = ev
+  if (ev.state === 'starting' || ev.state === 'video' || ev.state === 'progress') {
+    playRunning.value = true
+  }
+  if (ev.state === 'passed' || ev.state === 'skipped' || ev.state === 'failed') {
+    loadCourseDetail()
+  }
+  if (ev.state === 'finished' || ev.state === 'cancelled') {
+    playRunning.value = false
+    loadCourseDetail()
+    if (ev.message) {
+      setNotice(ev.message, ev.state === 'finished' ? 'ok' : 'info')
+    }
+  }
+  refreshDebug()
+}
+
+async function scanDocs() {
+  docBusy.value = true
+  setNotice('')
+  try {
+    courseDetail.value = await ScanCourse()
+    setNotice('文档任务扫描完成', 'ok')
+  } catch (e) {
+    setNotice(friendly(e), 'error')
+  } finally {
+    docBusy.value = false
+    refreshDebug()
+  }
+}
+
+async function completeDocs() {
+  docBusy.value = true
+  setNotice('')
+  try {
+    courseDetail.value = await CompleteDocs()
+    setNotice('文档任务处理完成，状态已刷新', 'ok')
+  } catch (e) {
+    setNotice(friendly(e), 'error')
+  } finally {
+    docBusy.value = false
+    refreshDebug()
+  }
+}
+
 function formatDuration(seconds) {
   const value = Number(seconds) || 0
   if (value <= 0) {
@@ -460,6 +613,17 @@ function formatDuration(seconds) {
     return hours + ' 小时 ' + minutes + ' 分钟'
   }
   return minutes + ' 分钟'
+}
+
+function formatClock(seconds) {
+  const total = Math.max(0, Math.round(Number(seconds) || 0))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const secs = total % 60
+  if (hours > 0) {
+    return hours + ':' + String(minutes).padStart(2, '0') + ':' + String(secs).padStart(2, '0')
+  }
+  return minutes + ':' + String(secs).padStart(2, '0')
 }
 
 async function bootstrap() {
@@ -479,10 +643,12 @@ async function bootstrap() {
 }
 
 let offQr = null
+let offPlay = null
 
 onMounted(() => {
   bootstrap()
   offQr = EventsOn('login:qr', onQrEvent)
+  offPlay = EventsOn('play:progress', onPlayEvent)
   document.addEventListener('click', onDocumentClick)
   window.addEventListener('keydown', onKeydown)
 })
@@ -493,6 +659,11 @@ onUnmounted(() => {
     offQr()
   } else {
     EventsOff('login:qr')
+  }
+  if (typeof offPlay === 'function') {
+    offPlay()
+  } else {
+    EventsOff('play:progress')
   }
   document.removeEventListener('click', onDocumentClick)
   window.removeEventListener('keydown', onKeydown)
@@ -568,10 +739,10 @@ onUnmounted(() => {
           <p v-if="pageLead" class="page-sub">{{ pageLead }}</p>
         </div>
         <div v-if="page === 'course'" class="actions">
-          <button @click="loadCourses(true)" :disabled="courseLoading || courseBusy">
+          <button @click="loadCourses(true)" :disabled="courseLoading || courseBusy || playRunning">
             {{ courseLoading ? '获取中' : '获取课程列表' }}
           </button>
-          <button v-if="hasCourse" @click="refreshCourse" :disabled="courseBusy">
+          <button v-if="hasCourse" @click="refreshCourse" :disabled="courseBusy || playRunning">
             {{ courseBusy ? '抓取中' : '抓取课程结构' }}
           </button>
         </div>
@@ -661,7 +832,7 @@ onUnmounted(() => {
               <span class="course-name">{{ item.name || '未命名课程' }}</span>
               <span class="course-teacher">{{ item.teacher }}</span>
               <span v-if="isCurrent(item)" class="course-current">当前</span>
-              <button @click="selectCourse(item.index)" :disabled="courseBusy || courseLoading">选择</button>
+              <button @click="selectCourse(item.index)" :disabled="courseBusy || courseLoading || playRunning">选择</button>
             </div>
           </div>
 
@@ -670,9 +841,40 @@ onUnmounted(() => {
               <span>章节 <b>{{ courseDetail.summary.chapters }}</b></span>
               <span>视频 <b>{{ courseDetail.summary.videosPassed }}/{{ courseDetail.summary.videos }}</b></span>
               <span>作业 <b>{{ courseDetail.summary.works }}</b></span>
+              <span v-if="courseDetail.summary.docs">文档 <b>{{ courseDetail.summary.docsPassed }}/{{ courseDetail.summary.docs }}</b></span>
               <span>总时长 <b>{{ courseDetail.summary.durationHours }}</b> 小时</span>
               <span v-if="courseDetail.summary.speedLimited">限 1 倍速 <b>{{ courseDetail.summary.speedLimited }}</b> 个</span>
               <span v-if="courseDetail.stale" class="warn-text">缓存属于另一门课</span>
+            </div>
+
+            <div class="play-bar">
+              <div class="play-controls actions">
+                <label class="play-speed">
+                  倍速
+                  <select v-model.number="playSpeed" :disabled="playRunning">
+                    <option :value="1">1x</option>
+                    <option :value="1.5">1.5x</option>
+                    <option :value="2">2x</option>
+                    <option :value="3">3x</option>
+                  </select>
+                </label>
+                <button class="primary" @click="startPlay('')" :disabled="playRunning || docBusy || !unpassedVideos.length">
+                  {{ playRunning ? '播放中' : (unpassedVideos.length ? '播放未完成 ' + unpassedVideos.length + ' 个' : '视频都已完成') }}
+                </button>
+                <button v-if="playRunning" @click="stopPlay">停止播放</button>
+                <span class="hint">限 1 倍速的任务点会按 1 倍播放</span>
+              </div>
+              <div v-if="playState.message" class="play-status">
+                <div class="play-line">
+                  <span class="play-message">{{ playState.message }}</span>
+                  <span v-if="playState.index" class="hint">第 {{ playState.index }}/{{ playState.total }} 个</span>
+                  <span v-if="playState.speedLimited" class="hint">限 1 倍速</span>
+                  <span v-if="playState.duration" class="hint">{{ formatClock(playState.played) }} / {{ formatClock(playState.duration) }}</span>
+                </div>
+                <div v-if="playRunning && playState.duration" class="play-track">
+                  <div class="play-fill" :style="{width: Math.min(100, playState.percent || 0) + '%'}"></div>
+                </div>
+              </div>
             </div>
 
             <div class="chapter-list">
@@ -682,13 +884,14 @@ onUnmounted(() => {
                   <span class="hint">视频 {{ ch.videosPassed }}/{{ ch.videos }}，作业 {{ ch.works }}</span>
                 </summary>
                 <ul class="task-list">
-                  <li v-for="(v, index) in videosByChapter[ch.id] || []" :key="'v' + ch.id + index">
+                  <li v-for="(v, index) in videosByChapter[ch.id] || []" :key="'v' + ch.id + index" :class="{playing: playRunning && playState.objectId === v.objectId}">
                     <span class="task-tag">视频</span>
                     <span class="task-title">{{ v.title || '未命名视频' }}</span>
                     <span class="hint">{{ formatDuration(v.duration) }}</span>
                     <span v-if="v.isPassed" class="ok-text">已完成</span>
                     <span v-else class="hint">未完成</span>
                     <span v-if="v.speedLimited" class="hint">限 1 倍速</span>
+                    <button v-if="!v.isPassed" class="row-play" @click="startPlay(v.objectId)" :disabled="playRunning || docBusy">播放</button>
                   </li>
                   <li v-for="(w, index) in worksByChapter[ch.id] || []" :key="'w' + ch.id + index">
                     <span class="task-tag">作业</span>
@@ -700,6 +903,33 @@ onUnmounted(() => {
                 </ul>
               </details>
             </div>
+
+            <details class="doc-section" open>
+              <summary>
+                <span class="chapter-name">文档任务</span>
+                <span class="hint" v-if="docScanned">已完成 {{ docPassed }}/{{ courseDetail.docs.length }}</span>
+                <span class="hint" v-else>未扫描</span>
+              </summary>
+              <div class="doc-actions actions">
+                <button @click="scanDocs" :disabled="docBusy || playRunning">
+                  {{ docBusy ? '处理中' : (docScanned ? '重新扫描' : '扫描文档任务') }}
+                </button>
+                <button v-if="docScanned && docUnpassed" class="primary" @click="completeDocs" :disabled="docBusy || playRunning">
+                  完成未完成的文档 {{ docUnpassed }} 个
+                </button>
+                <span class="hint" v-if="!docScanned">扫描会逐章读取附件，可能需要十几秒</span>
+              </div>
+              <p v-if="docScanned && !courseDetail.docs.length" class="hint">这门课没有文档任务点。</p>
+              <ul v-if="courseDetail.docs.length" class="task-list doc-list">
+                <li v-for="(d, index) in courseDetail.docs" :key="'d' + d.chapterId + index">
+                  <span class="task-tag">文档</span>
+                  <span class="task-title">{{ d.title || '未命名文档' }}</span>
+                  <span v-if="d.chapterIndex" class="hint">第 {{ d.chapterIndex }} 章</span>
+                  <span v-if="d.isPassed" class="ok-text">已完成</span>
+                  <span v-else class="hint">未完成</span>
+                </li>
+              </ul>
+            </details>
           </template>
         </template>
 
@@ -1396,6 +1626,126 @@ button.primary:disabled {
 
 .warn-text {
   color: #a35c00;
+}
+
+/* 播放 */
+.play-bar {
+  margin: 12px 0 10px;
+  padding: 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.play-speed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.play-speed select {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.play-controls .hint {
+  margin: 0;
+}
+
+.play-status {
+  margin-top: 10px;
+}
+
+.play-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.play-message {
+  font-size: 13px;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.play-line .hint {
+  margin: 0;
+}
+
+.play-track {
+  height: 4px;
+  margin-top: 8px;
+  border-radius: 2px;
+  background: #e5e5ea;
+  overflow: hidden;
+}
+
+.play-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--primary);
+  transition: width 0.4s ease;
+}
+
+.task-list li.playing {
+  background: #eaf1ff;
+  border-radius: 4px;
+}
+
+.row-play {
+  flex: none;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--link);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.row-play:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.row-play:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+/* 文档任务 */
+.doc-section {
+  margin-top: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+}
+
+.doc-section summary {
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.doc-actions {
+  margin: 10px 0 4px;
+}
+
+.doc-actions .hint {
+  margin: 0;
+}
+
+.doc-list {
+  max-height: 240px;
 }
 
 .inline-error {

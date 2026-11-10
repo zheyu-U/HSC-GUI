@@ -5,11 +5,15 @@ import {hsc} from '../models';
 
 export function AppMode():Promise<main.AppModeInfo>;
 
+export function CancelPlay():Promise<void>;
+
 export function CancelQRLogin():Promise<void>;
 
 export function CheckSession():Promise<hsc.CheckResult>;
 
 export function ClearDebugLog():Promise<void>;
+
+export function CompleteDocs():Promise<hsc.CourseDetail>;
 
 export function DebugInfo():Promise<main.DebugInfo>;
 
@@ -25,10 +29,14 @@ export function Logout(arg1:boolean):Promise<hsc.LogoutResult>;
 
 export function RefreshCourse():Promise<hsc.CourseDetail>;
 
+export function ScanCourse():Promise<hsc.CourseDetail>;
+
 export function SelectCourse(arg1:number):Promise<hsc.CourseDetail>;
 
 export function SessionStatus():Promise<hsc.SessionInfo>;
 
 export function StartCaptcha():Promise<hsc.CaptchaView>;
+
+export function StartPlay(arg1:string,arg2:number):Promise<hsc.PlayStartResult>;
 
 export function StartQRLogin():Promise<hsc.QRLoginResult>;

@@ -13,7 +13,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-const appVersion = "0.5.0"
+const appVersion = "0.6.0"
 
 // App 是暴露给前端的绑定对象，方法清单同步维护在 docs/api.md。
 type App struct {
@@ -263,4 +263,53 @@ func (a *App) GetCourseDetail() (hsc.CourseDetail, error) {
 		a.record("错误", "GetCourseDetail: "+err.Error())
 	}
 	return detail, err
+}
+
+// ScanCourse 扫描当前课程的文档任务点，结果写入 state/course/scan.json。
+func (a *App) ScanCourse() (hsc.CourseDetail, error) {
+	a.record("调用", "ScanCourse")
+	detail, err := hsc.ScanCourse()
+	if err != nil {
+		a.record("错误", "ScanCourse: "+err.Error())
+		return detail, err
+	}
+	a.record("结果", fmt.Sprintf("文档任务 %d 个，已完成 %d 个", detail.Summary.Docs, detail.Summary.DocsPassed))
+	return detail, nil
+}
+
+// CompleteDocs 完成未完成的文档任务，完成后重新扫描刷新状态。
+func (a *App) CompleteDocs() (hsc.CourseDetail, error) {
+	a.record("调用", "CompleteDocs")
+	detail, err := hsc.CompleteDocs()
+	if err != nil {
+		a.record("错误", "CompleteDocs: "+err.Error())
+		return detail, err
+	}
+	a.record("结果", fmt.Sprintf("文档任务 %d 个，已完成 %d 个", detail.Summary.Docs, detail.Summary.DocsPassed))
+	return detail, nil
+}
+
+// StartPlay 后台播放视频任务点，进度经 play:progress 事件推送。
+func (a *App) StartPlay(objectID string, speed float64) (hsc.PlayStartResult, error) {
+	a.record("调用", fmt.Sprintf("StartPlay objectId=%q speed=%g", objectID, speed))
+	res, err := hsc.StartPlay(objectID, speed, func(ev hsc.PlayEvent) {
+		if ev.State != "progress" {
+			a.record("事件", "play "+ev.State+" "+ev.Message)
+		}
+		if a.ctx != nil {
+			runtime.EventsEmit(a.ctx, "play:progress", ev)
+		}
+	})
+	if err != nil {
+		a.record("错误", "StartPlay: "+err.Error())
+		return res, err
+	}
+	a.record("结果", res.Message)
+	return res, nil
+}
+
+// CancelPlay 停止正在进行的播放。
+func (a *App) CancelPlay() {
+	a.record("调用", "CancelPlay")
+	hsc.CancelPlay()
 }

@@ -132,12 +132,48 @@
 | --- | --- | --- |
 | hasCourse | boolean | 是否已有课程结构缓存 |
 | stale | boolean | 缓存属于另一门课（需要重新抓取） |
+| docScanned | boolean | 是否已有当前课程的 `state/course/scan.json`（文档任务扫描结果） |
 | target | Target | 课程参数：`name` `courseId` `clazzId` `cpi` `enc` |
-| summary | CourseSummary | `chapters` `videos` `videosPassed` `works` `durationHours` `speedLimited` `fetchedAt` |
+| summary | CourseSummary | `chapters` `videos` `videosPassed` `works` `docs` `docsPassed` `durationHours` `speedLimited` `fetchedAt` |
 | chapters | CourseChapter[] | `index` `id` `title`（上游章节接口不返回标题，可能为空）`videos` `videosPassed` `works` |
-| videos | CourseVideo[] | `chapterIndex` `chapterId` `title` `duration`（秒）`isPassed` `speedLimited` `playTime` |
+| videos | CourseVideo[] | `chapterIndex` `chapterId` `objectId` `title` `duration`（秒）`isPassed` `speedLimited` `playTime` |
 | works | CourseWork[] | `chapterIndex` `chapterId` `title` `workId` `workType` |
+| docs | CourseDoc[] | 文档任务：`chapterIndex` `chapterId` `title` `module` `isPassed`；未扫描时为空数组 |
 | message | string | 状态说明，可直接展示 |
+
+### ScanCourse() -> CourseDetail
+
+逐章扫描附件（对应上游 `hsc scan`），结果写入 `state/course/scan.json`，返回刷新后的课程详情。
+扫描需要已登录并已配置课程，可能要十几秒；GUI 用 busy 状态提示。
+
+### CompleteDocs() -> CourseDetail
+
+完成未完成的文档任务（对应上游 `hsc doc`）：调用上游 `cmdDoc` 逐个完成，再重新扫描
+`scan.json` 刷新状态。未扫描时 reject，提示先点“扫描文档任务”。
+
+### StartPlay(objectID, speed) -> PlayStartResult
+
+后台播放视频任务点（对应上游 `hsc play`）。立即返回，进度通过 `play:progress` 事件推送。
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| objectID | string | 为空时播放全部未完成任务点；给值只播这一个视频 |
+| speed | number | 倍速，默认 1；限 1 倍速的任务点会自动按 1 倍播放 |
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| running | boolean | 是否已开始播放 |
+| total | number | 本次待播放的任务点数量 |
+| message | string | 结果说明，可直接展示 |
+
+- 播放循环在 `internal/hsc/gui.go` 里按 tick 编排，签名、上报参数与限速判断复用上游
+  `report` / `videoMeta` / `refreshedVideo` / `courseRT` / `speedLimited`
+- 每个任务点通过后会立刻把 `isPassed` 写回 `state/course/course.json`，CLI 读同一份缓存
+- 同一时间只允许一个播放任务，重复调用 reject；未登录、未抓取课程结构时 reject
+
+### CancelPlay() -> void
+
+停止正在进行的播放：当前这一次上报完成后结束，事件会再推一条 `cancelled`。
 
 ### AppMode() -> AppModeInfo
 
@@ -200,6 +236,35 @@
 - `cancelled`：用户取消
 - `error`：换取登录态或保存失败，message 为原因
 
+### play:progress
+
+视频播放进度。前端 `EventsOn('play:progress', handler)` 订阅，组件卸载时取消订阅。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| state | string | `starting` `video` `progress` `passed` `skipped` `failed` `finished` `cancelled` |
+| message | string | 给用户看的一句话 |
+| objectId | string | 当前视频的 objectId |
+| title | string | 当前视频标题 |
+| index | number | 当前第几个（从 1 开始；结束后为 0） |
+| total | number | 本次总任务点数 |
+| percent | number | 当前视频进度 0 到 100 |
+| played | number | 已上报的播放秒数 |
+| duration | number | 当前视频总秒数 |
+| speedLimited | boolean | 当前任务点是否限 1 倍速 |
+| ok / fail / skipped | number | 到目前为止通过 / 失败 / 跳过的数量 |
+
+状态含义：
+
+- `starting`：开始播放，message 里是总任务点数和总时长
+- `video`：开始处理某个任务点
+- `progress`：一次上报后的进度
+- `passed`：该任务点通过，已写回 `course/course.json`
+- `skipped`：服务端已标记通过，跳过
+- `failed`：该任务点失败，message 里是原因
+- `finished`：全部处理完，携带通过 / 失败 / 跳过数量
+- `cancelled`：用户停止播放
+
 ## 上游锚点
 
 - 扫码与账密流程：上游 `go/login_cmd.go`
@@ -207,4 +272,6 @@
 - 验证码识别：上游 `go/captcha.go`
 - 凭据加密格式：上游 `go/creds.go`
 - 状态路径映射：上游 `go/config.go` 的 `stateLayout`
+- 播放上报、限速与签名：上游 `go/video.go`；开播前刷新参数：`go/video_refresh.go`
+- 文档任务扫描与完成：上游 `go/scan_doc.go`
 - GUI 侧的编排代码：`internal/hsc/gui.go`（本仓库新增，不属于上游同步范围）

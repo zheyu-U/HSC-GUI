@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"os"
@@ -468,11 +469,21 @@ type CourseChapter struct {
 type CourseVideo struct {
 	ChapterIndex int     `json:"chapterIndex"`
 	ChapterID    string  `json:"chapterId"`
+	ObjectID     string  `json:"objectId"`
 	Title        string  `json:"title"`
 	Duration     int     `json:"duration"`
 	IsPassed     bool    `json:"isPassed"`
 	SpeedLimited bool    `json:"speedLimited"`
 	PlayTime     float64 `json:"playTime"`
+}
+
+// CourseDoc 文档任务点视图，来自 scan.json（上游 scan 命令的产物）。
+type CourseDoc struct {
+	ChapterIndex int    `json:"chapterIndex"`
+	ChapterID    string `json:"chapterId"`
+	Title        string `json:"title"`
+	Module       string `json:"module"`
+	IsPassed     bool   `json:"isPassed"`
 }
 
 // CourseWork 作业任务点视图。
@@ -490,6 +501,8 @@ type CourseSummary struct {
 	Videos        int     `json:"videos"`
 	VideosPassed  int     `json:"videosPassed"`
 	Works         int     `json:"works"`
+	Docs          int     `json:"docs"`
+	DocsPassed    int     `json:"docsPassed"`
 	DurationHours float64 `json:"durationHours"`
 	SpeedLimited  int     `json:"speedLimited"`
 	FetchedAt     string  `json:"fetchedAt"`
@@ -497,14 +510,16 @@ type CourseSummary struct {
 
 // CourseDetail 课程页需要的全部数据。
 type CourseDetail struct {
-	HasCourse bool            `json:"hasCourse"`
-	Stale     bool            `json:"stale"`
-	Target    Target          `json:"target"`
-	Summary   CourseSummary   `json:"summary"`
-	Chapters  []CourseChapter `json:"chapters"`
-	Videos    []CourseVideo   `json:"videos"`
-	Works     []CourseWork    `json:"works"`
-	Message   string          `json:"message"`
+	HasCourse  bool            `json:"hasCourse"`
+	Stale      bool            `json:"stale"`
+	DocScanned bool            `json:"docScanned"`
+	Target     Target          `json:"target"`
+	Summary    CourseSummary   `json:"summary"`
+	Chapters   []CourseChapter `json:"chapters"`
+	Videos     []CourseVideo   `json:"videos"`
+	Works      []CourseWork    `json:"works"`
+	Docs       []CourseDoc     `json:"docs"`
+	Message    string          `json:"message"`
 }
 
 // ListCourses 获取当前账号的课程列表；refresh 为 true 时重新拉取，不用缓存。
@@ -606,6 +621,7 @@ func buildCourseDetail() (CourseDetail, error) {
 		out.Videos = append(out.Videos, CourseVideo{
 			ChapterIndex: ci,
 			ChapterID:    v.ChapterID,
+			ObjectID:     v.ObjectID,
 			Title:        v.Title,
 			Duration:     v.AttDuration,
 			IsPassed:     v.IsPassed,
@@ -639,12 +655,40 @@ func buildCourseDetail() (CourseDetail, error) {
 			chapters[ci-1].Works++
 		}
 	}
+
+	// 文档任务来自 scan.json；没有扫描过或缓存属于另一门课时，界面上提示先扫描。
+	var scan ScanResult
+	scanReady := readJSON(statePath("scan.json"), &scan) == nil &&
+		(scan.CourseID == "" || scan.CourseID == t.CourseID)
+	out.DocScanned = scanReady
+	docsPassed := 0
+	if scanReady {
+		for _, r := range scan.Rows {
+			if !isDocTaskRow(r) {
+				continue
+			}
+			ci := chapterIndex[r.Chapter]
+			out.Docs = append(out.Docs, CourseDoc{
+				ChapterIndex: ci,
+				ChapterID:    r.Chapter,
+				Title:        r.Title,
+				Module:       r.Module,
+				IsPassed:     r.IsPassed,
+			})
+			if r.IsPassed {
+				docsPassed++
+			}
+		}
+	}
+
 	out.Chapters = chapters
 	out.Summary = CourseSummary{
 		Chapters:      len(snap.Chapters),
 		Videos:        len(snap.Videos),
 		VideosPassed:  passed,
 		Works:         len(snap.Works),
+		Docs:          len(out.Docs),
+		DocsPassed:    docsPassed,
 		DurationHours: math.Round(float64(totalDuration)/3600*100) / 100,
 		SpeedLimited:  limited,
 		FetchedAt:     snap.FetchedAt,
@@ -659,4 +703,396 @@ func buildCourseDetail() (CourseDetail, error) {
 		out.Message = "课程结构已加载。"
 	}
 	return out, nil
+}
+
+// ---- 视频播放 ----
+
+// PlayEvent 播放进度，经 Wails Events 推给前端（play:progress）。
+type PlayEvent struct {
+	State        string  `json:"state"`
+	Message      string  `json:"message"`
+	ObjectID     string  `json:"objectId"`
+	Title        string  `json:"title"`
+	Index        int     `json:"index"`
+	Total        int     `json:"total"`
+	Percent      float64 `json:"percent"`
+	Played       float64 `json:"played"`
+	Duration     float64 `json:"duration"`
+	SpeedLimited bool    `json:"speedLimited"`
+	Ok           int     `json:"ok"`
+	Fail         int     `json:"fail"`
+	Skipped      int     `json:"skipped"`
+}
+
+// PlayStartResult 开始播放的即时结果。
+type PlayStartResult struct {
+	Running bool   `json:"running"`
+	Total   int    `json:"total"`
+	Message string `json:"message"`
+}
+
+var (
+	playMu      sync.Mutex
+	playCancel  chan struct{}
+	playRunning bool
+)
+
+// errPlayCancelled 播放被用户停止时返回；只在 gui.go 里流转，不会展示成错误。
+var errPlayCancelled = errors.New("已停止播放")
+
+// StartPlay 后台播放视频任务点：objectID 为空时播放全部未完成的任务点，
+// speed 为倍速，限 1 倍速的任务点会自动降回 1 倍。
+// 进度通过 onEvent 推送；通过一个就把状态写回 course.json，CLI 与 GUI 都能读到。
+func StartPlay(objectID string, speed float64, onEvent func(PlayEvent)) (PlayStartResult, error) {
+	if err := InitState(); err != nil {
+		return PlayStartResult{}, err
+	}
+	if speed <= 0 {
+		speed = 1
+	}
+
+	playMu.Lock()
+	if playRunning {
+		playMu.Unlock()
+		return PlayStartResult{}, fmt.Errorf("播放已在进行，先停止再开始")
+	}
+	playRunning = true
+	cancel := make(chan struct{})
+	playCancel = cancel
+	playMu.Unlock()
+
+	reset := func() {
+		playMu.Lock()
+		playRunning = false
+		playCancel = nil
+		playMu.Unlock()
+	}
+
+	t, err := loadTarget()
+	if err != nil {
+		reset()
+		return PlayStartResult{}, fmt.Errorf("还没有选择课程，先在课程列表里选一门")
+	}
+	var snap CourseSnapshot
+	if err := readJSON(statePath("course.json"), &snap); err != nil {
+		reset()
+		return PlayStartResult{}, fmt.Errorf("还没有抓取课程结构，先点“抓取课程结构”")
+	}
+	if snap.Target.CourseID != "" && snap.Target.CourseID != t.CourseID {
+		reset()
+		return PlayStartResult{}, fmt.Errorf("课程结构缓存属于另一门课，先点“抓取课程结构”重新拉取")
+	}
+	c := newClient(NewJar())
+	if err := loadSession(c); err != nil {
+		reset()
+		return PlayStartResult{}, fmt.Errorf("未登录，先完成登录再播放")
+	}
+
+	var todo []VideoPoint
+	for _, v := range snap.Videos {
+		if objectID != "" && v.ObjectID != objectID {
+			continue
+		}
+		if v.IsPassed {
+			continue
+		}
+		todo = append(todo, v)
+	}
+	if len(todo) == 0 {
+		reset()
+		if objectID != "" {
+			return PlayStartResult{}, fmt.Errorf("这个视频任务点已完成，不用再播放")
+		}
+		return PlayStartResult{}, fmt.Errorf("没有未完成的视频任务点")
+	}
+
+	emit := func(ev PlayEvent) {
+		if onEvent != nil {
+			onEvent(ev)
+		}
+	}
+
+	go func() {
+		defer reset()
+		defaultReportURL = snap.ReportURL
+
+		totalSec := 0
+		limited := 0
+		for _, v := range todo {
+			totalSec += v.AttDuration
+			if speedLimited(v.OtherInfo) {
+				limited++
+			}
+		}
+		startMsg := fmt.Sprintf("准备播放 %d 个任务点，合计 %.1f 小时", len(todo), float64(totalSec)/3600)
+		if limited > 0 && speed > 1 {
+			startMsg += fmt.Sprintf("；%d 个限 1 倍速，会按 1 倍播放", limited)
+		}
+		emit(PlayEvent{State: "starting", Message: startMsg, Total: len(todo)})
+
+		ok, fail, skipped := 0, 0, 0
+		for i, v := range todo {
+			if isPlayCancelled(cancel) {
+				emit(PlayEvent{State: "cancelled", Message: fmt.Sprintf("已停止播放，通过 %d，失败 %d，跳过 %d", ok, fail, skipped), Ok: ok, Fail: fail, Skipped: skipped})
+				return
+			}
+			oriented := v
+			if os.Getenv("HSC_SKIP_REFRESH") == "" {
+				if fresh, err := refreshedVideo(c, t, oriented); err == nil {
+					oriented = fresh
+					if oriented.IsPassed {
+						markSnapshotPassed(oriented.ObjectID)
+						skipped++
+						emit(PlayEvent{State: "skipped", Message: "服务端标记已通过，跳过：" + oriented.Title, ObjectID: oriented.ObjectID, Title: oriented.Title, Index: i + 1, Total: len(todo), Percent: 100, SpeedLimited: speedLimited(oriented.OtherInfo), Ok: ok, Fail: fail, Skipped: skipped})
+						continue
+					}
+				}
+			}
+			emit(PlayEvent{State: "video", Message: "开始播放：" + oriented.Title, ObjectID: oriented.ObjectID, Title: oriented.Title, Index: i + 1, Total: len(todo), Duration: float64(oriented.AttDuration), SpeedLimited: speedLimited(oriented.OtherInfo), Ok: ok, Fail: fail, Skipped: skipped})
+
+			index := i + 1
+			passed, err := playVideoGUI(c, t, oriented, speed, 10, cancel, func(played, dur float64) {
+				percent := 0.0
+				if dur > 0 {
+					percent = math.Round(played/dur*1000) / 10
+				}
+				if percent > 100 {
+					percent = 100
+				}
+				emit(PlayEvent{State: "progress", Message: "正在播放：" + oriented.Title, ObjectID: oriented.ObjectID, Title: oriented.Title, Index: index, Total: len(todo), Percent: percent, Played: played, Duration: dur, SpeedLimited: speedLimited(oriented.OtherInfo), Ok: ok, Fail: fail, Skipped: skipped})
+			})
+			switch {
+			case errors.Is(err, errPlayCancelled):
+				emit(PlayEvent{State: "cancelled", Message: fmt.Sprintf("已停止播放，通过 %d，失败 %d，跳过 %d", ok, fail, skipped), Ok: ok, Fail: fail, Skipped: skipped})
+				return
+			case err != nil:
+				fail++
+				emit(PlayEvent{State: "failed", Message: "播放失败：" + oriented.Title + "（" + err.Error() + "）", ObjectID: oriented.ObjectID, Title: oriented.Title, Index: index, Total: len(todo), Ok: ok, Fail: fail, Skipped: skipped})
+			case passed:
+				ok++
+				markSnapshotPassed(oriented.ObjectID)
+				emit(PlayEvent{State: "passed", Message: "已通过：" + oriented.Title, ObjectID: oriented.ObjectID, Title: oriented.Title, Index: index, Total: len(todo), Percent: 100, Duration: float64(oriented.AttDuration), Ok: ok, Fail: fail, Skipped: skipped})
+			}
+		}
+		emit(PlayEvent{State: "finished", Message: fmt.Sprintf("播放结束：通过 %d，失败 %d，跳过 %d", ok, fail, skipped), Total: len(todo), Ok: ok, Fail: fail, Skipped: skipped})
+	}()
+
+	return PlayStartResult{
+		Running: true,
+		Total:   len(todo),
+		Message: fmt.Sprintf("开始播放 %d 个任务点", len(todo)),
+	}, nil
+}
+
+// CancelPlay 停止正在进行的播放；当前这一次上报完成后生效。
+func CancelPlay() {
+	playMu.Lock()
+	cancel := playCancel
+	playMu.Unlock()
+	if cancel == nil {
+		return
+	}
+	select {
+	case <-cancel:
+	default:
+		close(cancel)
+	}
+}
+
+func isPlayCancelled(cancel <-chan struct{}) bool {
+	select {
+	case <-cancel:
+		return true
+	default:
+		return false
+	}
+}
+
+// sleepPlay 等待 tick 秒，等待期间可被停止；返回 true 表示已取消。
+func sleepPlay(sec float64, cancel <-chan struct{}) bool {
+	if sec <= 0 {
+		return isPlayCancelled(cancel)
+	}
+	timer := time.NewTimer(time.Duration(sec * float64(time.Second)))
+	defer timer.Stop()
+	select {
+	case <-cancel:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// playVideoGUI 是上游 playOne 的界面版：循环与重试策略保持一致，
+// 但每一步通过 onProgress 回报进度，并且可以中途停止。
+// 签名、上报参数、限速判断仍走上游 report / videoMeta / courseRT / speedLimited。
+func playVideoGUI(c *Client, t Target, v VideoPoint, speed float64, tickSec float64, cancel <-chan struct{}, onProgress func(played, dur float64)) (bool, error) {
+	st, err := videoMeta(c, v)
+	if err != nil {
+		return false, err
+	}
+	rt := courseRT(v.OtherInfo)
+	dur := st.Duration
+	if dur <= 0 {
+		return false, fmt.Errorf("时长异常: %v", dur)
+	}
+	target := dur - 2
+	if speedLimited(v.OtherInfo) && speed > 1 {
+		speed = 1
+	}
+	if tickSec <= 0 {
+		tickSec = 10
+	}
+	step := speed * tickSec
+	if step <= 0 {
+		step = tickSec
+	}
+	played := playTimeSeconds(v)
+	if played < 0 {
+		played = 0
+	}
+	// 服务端记录的进度不能超过时长；超了就从头开始（与上游 playOne 一致）。
+	if played >= target {
+		played = math.Max(target-step, 0)
+	}
+	onProgress(played, dur)
+	for attempt := 0; attempt < 400; attempt++ {
+		if isPlayCancelled(cancel) {
+			return false, errPlayCancelled
+		}
+		played = math.Min(played+step, target)
+		passed, err := report(c, t, v, st, played, dur, rt)
+		if err != nil {
+			return false, err
+		}
+		onProgress(played, dur)
+		if passed {
+			return true, nil
+		}
+		if played >= target {
+			break
+		}
+		if sleepPlay(tickSec, cancel) {
+			return false, errPlayCancelled
+		}
+	}
+	// 阶梯补报：95% → 98%，每次换新 dtoken（与上游一致）。
+	for _, pct := range []float64{0.95, 0.96, 0.97, 0.98} {
+		if isPlayCancelled(cancel) {
+			return false, errPlayCancelled
+		}
+		if st2, err := videoMeta(c, v); err == nil {
+			st = st2
+		}
+		onProgress(dur*pct, dur)
+		if passed, err := report(c, t, v, st, dur*pct, dur, rt); err == nil && passed {
+			return true, nil
+		}
+		if sleepPlay(math.Max(tickSec/2, 1), cancel) {
+			return false, errPlayCancelled
+		}
+	}
+	// 换 token 再报几次（与上游一致）。
+	for i := 0; i < 4; i++ {
+		if isPlayCancelled(cancel) {
+			return false, errPlayCancelled
+		}
+		st2, err := videoMeta(c, v)
+		if err != nil {
+			if sleepPlay(2, cancel) {
+				return false, errPlayCancelled
+			}
+			continue
+		}
+		if passed, err := report(c, t, v, st2, dur*0.97, dur, rt); err == nil && passed {
+			return true, nil
+		}
+		if sleepPlay(3, cancel) {
+			return false, errPlayCancelled
+		}
+	}
+	return false, fmt.Errorf("多次上报仍未通过")
+}
+
+// markSnapshotPassed 把已通过的视频状态写回 course.json 缓存。
+// 只在服务端明确返回 isPassed=true 后调用，CLI 会按这个状态跳过已完成任务点。
+func markSnapshotPassed(objectID string) {
+	if objectID == "" {
+		return
+	}
+	var snap CourseSnapshot
+	if err := readJSON(statePath("course.json"), &snap); err != nil {
+		return
+	}
+	changed := false
+	for i := range snap.Videos {
+		if snap.Videos[i].ObjectID == objectID && !snap.Videos[i].IsPassed {
+			snap.Videos[i].IsPassed = true
+			changed = true
+		}
+	}
+	if changed {
+		_ = writeJSON(statePath("course.json"), snap)
+	}
+}
+
+// ---- 文档任务 ----
+
+// isDocTaskRow 与上游 cmdDoc 的过滤条件一致：文档附件才处理。
+func isDocTaskRow(r ScanRow) bool {
+	return strings.Contains(r.Module, "insertdoc") || r.Type == "document"
+}
+
+// ScanCourse 逐章扫描附件（上游 scan 能力），结果写入 state/course/scan.json。
+func ScanCourse() (CourseDetail, error) {
+	if err := InitState(); err != nil {
+		return CourseDetail{}, err
+	}
+	t, err := loadTarget()
+	if err != nil {
+		return CourseDetail{}, fmt.Errorf("还没有选择课程，先在课程列表里选一门")
+	}
+	c := newClient(NewJar())
+	if err := loadSession(c); err != nil {
+		return CourseDetail{}, fmt.Errorf("未登录，先完成登录再扫描文档任务")
+	}
+	if _, err := scanCourse(c, t); err != nil {
+		return CourseDetail{}, fmt.Errorf("扫描文档任务失败: %w", err)
+	}
+	return buildCourseDetail()
+}
+
+// CompleteDocs 完成未完成的文档任务（上游 cmdDoc），完成后重新扫描刷新状态。
+func CompleteDocs() (CourseDetail, error) {
+	if err := InitState(); err != nil {
+		return CourseDetail{}, err
+	}
+	t, err := loadTarget()
+	if err != nil {
+		return CourseDetail{}, fmt.Errorf("还没有选择课程，先在课程列表里选一门")
+	}
+	scan, err := loadScanFor(t)
+	if err != nil {
+		return CourseDetail{}, fmt.Errorf("还没有扫描文档任务，先点“扫描文档任务”")
+	}
+	pending := 0
+	for _, r := range scan.Rows {
+		if isDocTaskRow(r) && !r.IsPassed {
+			pending++
+		}
+	}
+	if pending == 0 {
+		return buildCourseDetail()
+	}
+	if err := cmdDoc(nil); err != nil {
+		return CourseDetail{}, fmt.Errorf("完成文档任务失败: %w", err)
+	}
+	c := newClient(NewJar())
+	if err := loadSession(c); err != nil {
+		return CourseDetail{}, fmt.Errorf("文档任务已处理，但读取登录态失败，请重新登录后确认状态")
+	}
+	if _, err := scanCourse(c, t); err != nil {
+		return CourseDetail{}, fmt.Errorf("文档任务已处理，但重新扫描失败: %w；可以稍后点“重新扫描”确认状态", err)
+	}
+	return buildCourseDetail()
 }

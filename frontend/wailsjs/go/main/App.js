@@ -6,6 +6,10 @@ export function AppMode() {
   return window['go']['main']['App']['AppMode']();
 }
 
+export function CancelPlay() {
+  return window['go']['main']['App']['CancelPlay']();
+}
+
 export function CancelQRLogin() {
   return window['go']['main']['App']['CancelQRLogin']();
 }
@@ -16,6 +20,10 @@ export function CheckSession() {
 
 export function ClearDebugLog() {
   return window['go']['main']['App']['ClearDebugLog']();
+}
+
+export function CompleteDocs() {
+  return window['go']['main']['App']['CompleteDocs']();
 }
 
 export function DebugInfo() {
@@ -46,6 +54,10 @@ export function RefreshCourse() {
   return window['go']['main']['App']['RefreshCourse']();
 }
 
+export function ScanCourse() {
+  return window['go']['main']['App']['ScanCourse']();
+}
+
 export function SelectCourse(arg1) {
   return window['go']['main']['App']['SelectCourse'](arg1);
 }
@@ -56,6 +68,10 @@ export function SessionStatus() {
 
 export function StartCaptcha() {
   return window['go']['main']['App']['StartCaptcha']();
+}
+
+export function StartPlay(arg1, arg2) {
+  return window['go']['main']['App']['StartPlay'](arg1, arg2);
 }
 
 export function StartQRLogin() {
