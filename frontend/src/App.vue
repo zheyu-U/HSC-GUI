@@ -19,6 +19,7 @@ import {
 } from '../wailsjs/go/main/App'
 import {EventsOff, EventsOn} from '../wailsjs/runtime/runtime'
 
+const page = ref('login')
 const mode = ref({mode: 'release', debug: false, version: ''})
 const tab = ref('qr')
 const view = ref('login')
@@ -58,6 +59,7 @@ const debugBusy = ref(false)
 
 const loggedIn = computed(() => !!(session.value && session.value.loggedIn))
 const account = computed(() => (session.value && session.value.account) || '')
+const hasCourse = computed(() => !!(courseDetail.value && courseDetail.value.hasCourse))
 const prettySession = computed(() => (session.value ? JSON.stringify(session.value, null, 2) : ''))
 const currentCourseID = computed(() => {
   if (!courseDetail.value || !courseDetail.value.target) {
@@ -95,6 +97,25 @@ function friendly(e) {
 function setNotice(message, kind) {
   notice.value = message || ''
   noticeKind.value = kind || 'info'
+}
+
+function showPage(name) {
+  if (name === 'debug' && !mode.value.debug) {
+    return
+  }
+  page.value = name
+  setNotice('')
+  if (name === 'course' && loggedIn.value) {
+    if (!courseDetail.value) {
+      loadCourseDetail()
+    }
+    if (!courseList.value.length && !courseLoading.value) {
+      loadCourses(true)
+    }
+  }
+  if (name === 'debug') {
+    refreshDebug()
+  }
 }
 
 function stopQrTimer() {
@@ -220,6 +241,7 @@ function onQrEvent(ev) {
 async function handleLoginSuccess(message) {
   justLoggedIn.value = true
   view.value = 'success'
+  page.value = 'login'
   setNotice(message, 'ok')
   await refreshSession()
   await loadCourseDetail()
@@ -289,15 +311,16 @@ async function doLogout() {
     const res = await Logout(logoutAll.value)
     justLoggedIn.value = false
     view.value = 'login'
+    page.value = 'login'
     qrImage.value = ''
     qrState.value = 'idle'
     qrMessage.value = ''
     checkMessage.value = ''
-    setNotice(res.message, 'ok')
-    await refreshSession()
     courseList.value = []
     courseDetail.value = null
     courseError.value = ''
+    setNotice(res.message, 'ok')
+    await refreshSession()
     if (!loggedIn.value) {
       generateQr()
     }
@@ -307,21 +330,6 @@ async function doLogout() {
     logoutBusy.value = false
     refreshDebug()
   }
-}
-
-async function bootstrap() {
-  try {
-    mode.value = await AppMode()
-  } catch (e) {
-    // AppMode 不可用时按 release 处理，保证界面能显示
-  }
-  await refreshSession()
-  if (loggedIn.value) {
-    loadCourseDetail()
-  } else {
-    generateQr()
-  }
-  refreshDebug()
 }
 
 async function loadCourseDetail() {
@@ -399,7 +407,23 @@ function formatDuration(seconds) {
   return minutes + ' 分钟'
 }
 
+async function bootstrap() {
+  try {
+    mode.value = await AppMode()
+  } catch (e) {
+    // AppMode 不可用时按 release 处理，保证界面能显示
+  }
+  await refreshSession()
+  if (loggedIn.value) {
+    loadCourseDetail()
+  } else {
+    generateQr()
+  }
+  refreshDebug()
+}
+
 let offQr = null
+
 watch(tab, (val) => {
   if (val === 'pw' && !captchaImage.value) {
     refreshCaptcha()
@@ -422,27 +446,61 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="page">
-    <header class="header">
-      <div>
-        <h1>hsc 课程助手</h1>
-        <p class="subtitle">智慧华中大课程平台登录</p>
-      </div>
-      <div class="header-side">
-        <span v-if="mode.debug" class="badge">debug 模式</span>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">hsc</span>
+        <span class="brand-name">课程助手</span>
         <span class="version">v{{ mode.version }}</span>
+        <span v-if="mode.debug" class="badge">debug</span>
       </div>
+      <nav class="nav">
+        <button :class="{active: page === 'login'}" @click="showPage('login')">登录</button>
+        <button :class="{active: page === 'course'}" @click="showPage('course')">课程</button>
+        <button v-if="mode.debug" :class="{active: page === 'debug'}" @click="showPage('debug')">调试</button>
+      </nav>
     </header>
 
-    <main class="layout">
-      <section class="card login-card">
-        <div v-if="view === 'success'" class="success">
-          <p class="success-title">{{ justLoggedIn ? '登录成功' : '已登录' }}</p>
-          <p v-if="account" class="success-sub">已登录账号 {{ account }}</p>
-          <p v-else class="success-sub">登录态已保存到本机</p>
-          <p class="success-note">{{ session ? session.message : '' }}</p>
-          <p class="success-tip">登录态和 hsc 命令行通用，可以直接在命令行里做后续操作。</p>
-        </div>
+    <main class="content">
+      <!-- 登录页 -->
+      <section v-if="page === 'login'" class="card">
+        <template v-if="view === 'success'">
+          <p class="page-title">{{ justLoggedIn ? '登录成功' : '已登录' }}</p>
+          <p class="page-sub">{{ account ? '账号 ' + account : '登录态已保存到本机' }}</p>
+
+          <dl class="facts">
+            <div>
+              <dt>登录状态</dt>
+              <dd>{{ loggedIn ? '有效' : '无' }}</dd>
+            </div>
+            <div>
+              <dt>记住账号</dt>
+              <dd>{{ session && session.credSaved ? '已保存' : '未保存' }}</dd>
+            </div>
+            <div>
+              <dt>课程信息</dt>
+              <dd>{{ session && session.hasTarget ? '已配置课程' : '未配置课程' }}</dd>
+            </div>
+            <template v-if="mode.debug">
+              <div>
+                <dt>state 目录</dt>
+                <dd class="mono">{{ session ? session.stateDir : '' }}</dd>
+              </div>
+              <div>
+                <dt>cookie 数量</dt>
+                <dd>{{ session ? session.cookieCount : 0 }}</dd>
+              </div>
+            </template>
+          </dl>
+
+          <div class="actions">
+            <button class="primary" @click="showPage('course')">进入课程</button>
+            <button @click="checkSession" :disabled="checkBusy">{{ checkBusy ? '检查中' : '检查会话' }}</button>
+            <button @click="doLogout" :disabled="logoutBusy">{{ logoutBusy ? '退出中' : '退出登录' }}</button>
+          </div>
+          <label class="check"><input v-model="logoutAll" type="checkbox"/> 同时删除已保存凭据</label>
+          <p v-if="checkMessage" class="muted">{{ checkMessage }}</p>
+        </template>
 
         <template v-else>
           <div class="tabs">
@@ -451,16 +509,14 @@ onUnmounted(() => {
           </div>
 
           <div v-if="tab === 'qr'" class="pane">
-            <p class="help">用企业微信或「华中大微校园」扫一扫，二维码 3 分钟内有效。</p>
+            <p class="hint">用企业微信或「华中大微校园」扫一扫，二维码 3 分钟内有效。</p>
             <div v-if="qrImage" class="qr-wrap">
               <img class="qr" :src="qrImage" alt="登录二维码"/>
-              <p class="status">
+              <p class="muted">
                 {{ qrMessage || '等待扫码' }}<span v-if="qrRemain > 0">，剩余 {{ qrRemain }} 秒</span>
               </p>
             </div>
-            <div v-else class="qr-empty">
-              <p>{{ qrBusy ? '正在获取二维码，请稍候' : '点下面的按钮获取二维码' }}</p>
-            </div>
+            <p v-else class="qr-empty">{{ qrBusy ? '正在获取二维码' : '准备二维码' }}</p>
             <div class="actions">
               <button class="primary" @click="generateQr" :disabled="qrBusy">
                 {{ qrImage ? '重新生成二维码' : '生成二维码' }}
@@ -481,14 +537,14 @@ onUnmounted(() => {
             <div class="captcha-row">
               <div class="captcha-box">
                 <img v-if="captchaImage" class="captcha" :src="captchaImage" alt="验证码" title="点击换一张" @click="refreshCaptcha"/>
-                <span v-else class="captcha-empty">验证码未获取</span>
+                <span v-else class="muted">验证码未获取</span>
               </div>
               <div class="captcha-side">
                 <div class="captcha-actions">
                   <button @click="refreshCaptcha" :disabled="captchaBusy">{{ captchaBusy ? '获取中' : '换一张' }}</button>
                   <input v-model="captchaCode" class="captcha-input" type="text" maxlength="4" placeholder="4 位验证码"/>
                 </div>
-                <p class="captcha-hint">{{ captchaHint }}</p>
+                <p class="hint">{{ captchaHint }}</p>
               </div>
             </div>
             <div class="actions">
@@ -498,143 +554,116 @@ onUnmounted(() => {
         </template>
       </section>
 
-      <aside class="card session-card">
-        <h2>登录状态</h2>
-        <p class="status-line">{{ session ? session.message : '读取中' }}</p>
-        <dl class="facts">
-          <div>
-            <dt>账号</dt>
-            <dd>{{ account || '未保存' }}</dd>
+      <!-- 课程页 -->
+      <section v-else-if="page === 'course'" class="card">
+        <template v-if="!loggedIn">
+          <p class="page-title">还没有登录</p>
+          <p class="hint">登录后才能查看课程列表和任务点。</p>
+          <div class="actions">
+            <button class="primary" @click="showPage('login')">去登录</button>
           </div>
-          <div>
-            <dt>本机登录态</dt>
-            <dd>{{ loggedIn ? '有效' : '无' }}</dd>
-          </div>
-          <div>
-            <dt>记住账号</dt>
-            <dd>{{ session && session.credSaved ? '已保存' : '未保存' }}</dd>
-          </div>
-          <div>
-            <dt>课程信息</dt>
-            <dd>{{ session && session.hasTarget ? '已配置课程' : '未配置课程' }}</dd>
-          </div>
-          <template v-if="mode.debug">
-            <div>
-              <dt>state 目录</dt>
-              <dd class="path">{{ session ? session.stateDir : '' }}</dd>
+        </template>
+
+        <template v-else>
+          <div class="page-head">
+            <h2>我的课程</h2>
+            <div class="actions">
+              <button @click="loadCourses(true)" :disabled="courseLoading || courseBusy">
+                {{ courseLoading ? '获取中' : '获取课程列表' }}
+              </button>
+              <button v-if="hasCourse" @click="refreshCourse" :disabled="courseBusy">
+                {{ courseBusy ? '抓取中' : '抓取课程结构' }}
+              </button>
             </div>
-            <div>
-              <dt>cookie 数量</dt>
-              <dd>{{ session ? session.cookieCount : 0 }}</dd>
+          </div>
+
+          <p v-if="courseDetail" class="hint">{{ courseDetail.message }}</p>
+          <p v-if="courseError" class="inline-error">{{ courseError }}</p>
+
+          <div v-if="courseList.length" class="course-list">
+            <div v-for="item in courseList" :key="item.courseId" class="course-row">
+              <span class="course-index">{{ item.index }}</span>
+              <span class="course-name">{{ item.name || '未命名课程' }}</span>
+              <span class="course-teacher">{{ item.teacher }}</span>
+              <span v-if="isCurrent(item)" class="course-current">当前</span>
+              <button @click="selectCourse(item.index)" :disabled="courseBusy || courseLoading">选择</button>
+            </div>
+          </div>
+
+          <template v-if="hasCourse">
+            <div class="course-summary">
+              <span>章节 <b>{{ courseDetail.summary.chapters }}</b></span>
+              <span>视频 <b>{{ courseDetail.summary.videosPassed }}/{{ courseDetail.summary.videos }}</b></span>
+              <span>作业 <b>{{ courseDetail.summary.works }}</b></span>
+              <span>总时长 <b>{{ courseDetail.summary.durationHours }}</b> 小时</span>
+              <span v-if="courseDetail.summary.speedLimited">限 1 倍速 <b>{{ courseDetail.summary.speedLimited }}</b> 个</span>
+              <span v-if="courseDetail.stale" class="warn-text">缓存属于另一门课</span>
+            </div>
+
+            <div class="chapter-list">
+              <details v-for="ch in courseDetail.chapters" :key="ch.id" class="chapter" :open="ch.index <= 2">
+                <summary>
+                  <span class="chapter-name">{{ ch.title || ('章节 ' + ch.index) }}</span>
+                  <span class="muted">视频 {{ ch.videosPassed }}/{{ ch.videos }}，作业 {{ ch.works }}</span>
+                </summary>
+                <ul class="task-list">
+                  <li v-for="(v, index) in videosByChapter[ch.id] || []" :key="'v' + ch.id + index">
+                    <span class="task-tag">视频</span>
+                    <span class="task-title">{{ v.title || '未命名视频' }}</span>
+                    <span class="muted">{{ formatDuration(v.duration) }}</span>
+                    <span v-if="v.isPassed" class="ok-text">已完成</span>
+                    <span v-else class="muted">未完成</span>
+                    <span v-if="v.speedLimited" class="muted">限 1 倍速</span>
+                  </li>
+                  <li v-for="(w, index) in worksByChapter[ch.id] || []" :key="'w' + ch.id + index">
+                    <span class="task-tag">作业</span>
+                    <span class="task-title">{{ w.title || '未命名作业' }}</span>
+                  </li>
+                  <li v-if="!((videosByChapter[ch.id] || []).length || (worksByChapter[ch.id] || []).length)" class="muted">
+                    本章没有可展示的任务点
+                  </li>
+                </ul>
+              </details>
             </div>
           </template>
-        </dl>
-        <div class="actions wrap">
-          <button @click="checkSession" :disabled="checkBusy">{{ checkBusy ? '检查中' : '检查会话' }}</button>
-          <label class="check"><input v-model="logoutAll" type="checkbox"/> 同时删除已保存凭据</label>
-          <button @click="doLogout" :disabled="logoutBusy || !loggedIn">{{ logoutBusy ? '退出中' : '退出登录' }}</button>
+        </template>
+      </section>
+
+      <!-- 调试页（仅 debug 构建） -->
+      <section v-else-if="page === 'debug' && mode.debug" class="card">
+        <div class="page-head">
+          <h2>调试信息</h2>
+          <div class="actions">
+            <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
+            <button @click="clearDebug">清空日志</button>
+          </div>
         </div>
-        <p v-if="checkMessage" class="status">{{ checkMessage }}</p>
-      </aside>
+
+        <div v-if="debugInfo" class="debug-grid">
+          <div><span>模式</span><b>{{ debugInfo.mode }}</b></div>
+          <div><span>state 目录</span><b class="mono">{{ debugInfo.stateDir }}</b></div>
+          <div><span>工作目录</span><b class="mono">{{ debugInfo.cwd }}</b></div>
+          <div><span>可执行文件</span><b class="mono">{{ debugInfo.exePath }}</b></div>
+          <div><span>Go 版本</span><b>{{ debugInfo.goVersion }}</b></div>
+          <div><span>系统</span><b>{{ debugInfo.os }}/{{ debugInfo.arch }}</b></div>
+          <div><span>cookie 数量</span><b>{{ debugInfo.cookieCount }}</b></div>
+          <div><span>登录态</span><b>{{ debugInfo.loggedIn ? '存在' : '无' }}</b></div>
+        </div>
+
+        <h3>最近日志</h3>
+        <ul class="debug-log">
+          <li v-for="(entry, index) in debugLog" :key="index">
+            <span class="mono">{{ entry.time }}</span>
+            <em>{{ entry.kind }}</em>
+            <span>{{ entry.message }}</span>
+          </li>
+        </ul>
+        <p v-if="!debugLog.length" class="hint">暂无日志</p>
+
+        <h3>原始会话状态</h3>
+        <pre class="debug-json">{{ prettySession }}</pre>
+      </section>
     </main>
-
-    <section v-if="loggedIn" class="card course-card">
-      <div class="course-head">
-        <h2>我的课程</h2>
-        <div class="actions">
-          <button @click="loadCourses(true)" :disabled="courseLoading || courseBusy">
-            {{ courseLoading ? '获取中' : '获取课程列表' }}
-          </button>
-          <button v-if="courseDetail && courseDetail.hasCourse" @click="refreshCourse" :disabled="courseBusy">
-            {{ courseBusy ? '抓取中' : '抓取课程结构' }}
-          </button>
-        </div>
-      </div>
-
-      <p v-if="courseDetail" class="status-line">{{ courseDetail.message }}</p>
-      <p v-if="courseError" class="inline-error">{{ courseError }}</p>
-
-      <div v-if="courseList.length" class="course-list">
-        <div v-for="item in courseList" :key="item.courseId" class="course-row">
-          <span class="course-index">{{ item.index }}</span>
-          <span class="course-name">{{ item.name || '未命名课程' }}</span>
-          <span class="course-teacher">{{ item.teacher }}</span>
-          <span v-if="isCurrent(item)" class="course-current">当前</span>
-          <button @click="selectCourse(item.index)" :disabled="courseBusy || courseLoading">选择</button>
-        </div>
-      </div>
-
-      <template v-if="courseDetail && courseDetail.hasCourse">
-        <div class="course-summary">
-          <span>章节 <b>{{ courseDetail.summary.chapters }}</b></span>
-          <span>视频 <b>{{ courseDetail.summary.videosPassed }}/{{ courseDetail.summary.videos }}</b></span>
-          <span>作业 <b>{{ courseDetail.summary.works }}</b></span>
-          <span>总时长 <b>{{ courseDetail.summary.durationHours }}</b> 小时</span>
-          <span v-if="courseDetail.summary.speedLimited">限 1 倍速 <b>{{ courseDetail.summary.speedLimited }}</b> 个</span>
-          <span v-if="courseDetail.stale" class="warn-text">缓存属于另一门课</span>
-        </div>
-
-        <div class="chapter-list">
-          <details v-for="ch in courseDetail.chapters" :key="ch.id" class="chapter" :open="ch.index <= 2">
-            <summary>
-              <span class="chapter-name">{{ ch.title || ('章节 ' + ch.index) }}</span>
-              <span class="muted">视频 {{ ch.videosPassed }}/{{ ch.videos }}，作业 {{ ch.works }}</span>
-            </summary>
-            <ul class="task-list">
-              <li v-for="(v, index) in videosByChapter[ch.id] || []" :key="'v' + ch.id + index">
-                <span class="task-tag">视频</span>
-                <span class="task-title">{{ v.title || '未命名视频' }}</span>
-                <span class="muted">{{ formatDuration(v.duration) }}</span>
-                <span v-if="v.isPassed" class="ok-text">已完成</span>
-                <span v-else class="muted">未完成</span>
-                <span v-if="v.speedLimited" class="muted">限 1 倍速</span>
-              </li>
-              <li v-for="(w, index) in worksByChapter[ch.id] || []" :key="'w' + ch.id + index">
-                <span class="task-tag">作业</span>
-                <span class="task-title">{{ w.title || '未命名作业' }}</span>
-              </li>
-              <li v-if="!((videosByChapter[ch.id] || []).length || (worksByChapter[ch.id] || []).length)" class="muted">
-                本章没有可展示的任务点
-              </li>
-            </ul>
-          </details>
-        </div>
-      </template>
-    </section>
-
-    <section v-if="mode.debug" class="card debug-panel">
-      <div class="debug-head">
-        <h2>调试信息</h2>
-        <div class="actions">
-          <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
-          <button @click="clearDebug">清空日志</button>
-        </div>
-      </div>
-
-      <div v-if="debugInfo" class="debug-grid">
-        <div><span>模式</span><b>{{ debugInfo.mode }}</b></div>
-        <div><span>state 目录</span><b class="mono">{{ debugInfo.stateDir }}</b></div>
-        <div><span>工作目录</span><b class="mono">{{ debugInfo.cwd }}</b></div>
-        <div><span>可执行文件</span><b class="mono">{{ debugInfo.exePath }}</b></div>
-        <div><span>Go 版本</span><b>{{ debugInfo.goVersion }}</b></div>
-        <div><span>系统</span><b>{{ debugInfo.os }}/{{ debugInfo.arch }}</b></div>
-        <div><span>cookie 数量</span><b>{{ debugInfo.cookieCount }}</b></div>
-        <div><span>登录态</span><b>{{ debugInfo.loggedIn ? '存在' : '无' }}</b></div>
-      </div>
-
-      <h3>最近日志</h3>
-      <ul class="debug-log">
-        <li v-for="(entry, index) in debugLog" :key="index">
-          <span class="mono">{{ entry.time }}</span>
-          <em>{{ entry.kind }}</em>
-          <span>{{ entry.message }}</span>
-        </li>
-      </ul>
-      <p v-if="!debugLog.length" class="caption">暂无日志</p>
-
-      <h3>原始会话状态</h3>
-      <pre class="debug-json">{{ prettySession }}</pre>
-    </section>
 
     <p v-if="notice" class="notice" :class="noticeKind">{{ notice }}</p>
     <footer class="footer">登录信息只保存在本机，和 hsc 命令行共用。</footer>
@@ -642,46 +671,37 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.page {
-  max-width: 980px;
+.app {
+  max-width: 760px;
   margin: 0 auto;
-  padding: 28px 20px 20px;
+  padding: 20px 16px 24px;
   box-sizing: border-box;
 }
 
-.header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 20px;
-}
-
-.header h1 {
-  margin: 0;
-  font-size: 24px;
-  font-weight: 600;
-}
-
-.subtitle {
-  margin: 4px 0 0;
-  color: #646a73;
-}
-
-.header-side {
+.topbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding-top: 6px;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #dee0e3;
 }
 
-.badge {
-  border: 1px solid #f5a623;
-  border-radius: 10px;
-  padding: 1px 8px;
-  color: #a35c00;
-  background: #fff7e6;
-  font-size: 12px;
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.logo {
+  font-size: 20px;
+  font-weight: 700;
+  color: #3370ff;
+}
+
+.brand-name {
+  font-size: 15px;
+  font-weight: 600;
 }
 
 .version {
@@ -689,53 +709,104 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-.layout {
-  display: grid;
-  grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
-  gap: 16px;
-  align-items: start;
+.badge {
+  border: 1px solid #f5a623;
+  border-radius: 10px;
+  padding: 0 6px;
+  color: #a35c00;
+  background: #fff7e6;
+  font-size: 12px;
+}
+
+.nav {
+  display: flex;
+  gap: 4px;
+}
+
+.nav button {
+  border: none;
+  background: transparent;
+  padding: 6px 12px;
+  border-radius: 4px;
+  color: #646a73;
+}
+
+.nav button:hover:not(:disabled) {
+  background: #f2f3f5;
+  color: #1f2329;
+}
+
+.nav button.active {
+  background: #eaf1ff;
+  color: #3370ff;
+  font-weight: 500;
+}
+
+.content {
+  margin-top: 16px;
 }
 
 .card {
   background: #ffffff;
   border: 1px solid #dee0e3;
   border-radius: 8px;
-  padding: 16px;
+  padding: 20px;
   box-sizing: border-box;
 }
 
-.login-card {
-  min-height: 360px;
+.page-title {
+  margin: 0 0 4px;
+  font-size: 26px;
+  font-weight: 600;
+}
+
+.page-sub {
+  margin: 0 0 16px;
+  color: #646a73;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.page-head h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
 }
 
 .tabs {
   display: flex;
-  gap: 8px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #eff0f1;
+  gap: 4px;
   margin-bottom: 16px;
 }
 
 .tabs button {
   border: none;
   background: transparent;
-  padding: 6px 10px;
+  padding: 6px 12px;
+  border-radius: 4px;
   color: #646a73;
 }
 
 .tabs button.active {
+  background: #eaf1ff;
   color: #3370ff;
-  border-bottom: 2px solid #3370ff;
-  border-radius: 0;
+  font-weight: 500;
 }
 
 .pane {
-  min-height: 270px;
+  min-height: 260px;
 }
 
-.help {
-  margin: 0 0 16px;
-  color: #646a73;
+.hint {
+  margin: 0 0 12px;
+  color: #8f959e;
+  font-size: 13px;
 }
 
 .qr-wrap {
@@ -747,22 +818,15 @@ onUnmounted(() => {
 }
 
 .qr {
-  width: 220px;
-  height: 220px;
+  width: 200px;
+  height: 200px;
   border: 1px solid #dee0e3;
 }
 
 .qr-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 260px;
+  margin: 24px 0;
+  text-align: center;
   color: #8f959e;
-}
-
-.status {
-  margin: 0;
-  color: #646a73;
 }
 
 .actions {
@@ -772,40 +836,8 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 
-.actions.wrap {
-  margin-top: 12px;
-}
-
-.success {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  min-height: 320px;
-  padding: 8px 12px;
-}
-
-.success-title {
-  margin: 0 0 8px;
-  font-size: 30px;
-  font-weight: 600;
-  color: #1a6b2f;
-}
-
-.success-sub {
-  margin: 0 0 8px;
-  font-size: 16px;
-}
-
-.success-note {
-  margin: 0 0 8px;
-  color: #646a73;
-}
-
-.success-tip {
-  margin: 0;
-  color: #8f959e;
-  font-size: 13px;
+.actions button {
+  flex: none;
 }
 
 .field {
@@ -832,8 +864,8 @@ onUnmounted(() => {
 }
 
 .captcha-box {
-  width: 120px;
-  height: 44px;
+  width: 110px;
+  height: 42px;
   border: 1px solid #dee0e3;
   border-radius: 4px;
   display: flex;
@@ -850,11 +882,6 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-.captcha-empty {
-  color: #a8abb2;
-  font-size: 12px;
-}
-
 .captcha-side {
   flex: 1;
   min-width: 0;
@@ -867,32 +894,14 @@ onUnmounted(() => {
 }
 
 .captcha-input {
-  width: 120px;
-}
-
-.captcha-hint {
-  margin: 6px 0 0;
-  color: #8f959e;
-  font-size: 12px;
-  min-height: 18px;
-}
-
-.session-card h2 {
-  margin: 0 0 8px;
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.status-line {
-  margin: 0 0 12px;
-  color: #646a73;
+  width: 110px;
 }
 
 .facts {
-  margin: 0;
+  margin: 0 0 16px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .facts > div {
@@ -902,7 +911,7 @@ onUnmounted(() => {
 
 .facts dt {
   flex: none;
-  width: 76px;
+  width: 80px;
   color: #8f959e;
 }
 
@@ -912,146 +921,25 @@ onUnmounted(() => {
   word-break: break-all;
 }
 
-.facts dd.path {
-  font-size: 12px;
-  color: #646a73;
-}
-
 .check {
   display: flex;
   align-items: center;
   gap: 4px;
+  margin-top: 10px;
   color: #646a73;
   font-size: 12px;
-}
-
-.debug-panel {
-  margin-top: 16px;
-}
-
-.debug-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.debug-head h2 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.debug-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 6px 16px;
-  margin: 12px 0;
-}
-
-.debug-grid > div {
-  display: flex;
-  gap: 8px;
-  min-width: 0;
-}
-
-.debug-grid span {
-  flex: none;
-  width: 88px;
-  color: #8f959e;
-  font-size: 13px;
-}
-
-.debug-grid b {
-  font-weight: 400;
-  min-width: 0;
-  word-break: break-all;
-}
-
-.debug-panel h3 {
-  margin: 16px 0 8px;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.debug-log {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  max-height: 220px;
-  overflow: auto;
-  border: 1px solid #eff0f1;
-  border-radius: 4px;
-}
-
-.debug-log li {
-  display: flex;
-  gap: 8px;
-  padding: 4px 8px;
-  border-bottom: 1px solid #f5f6f7;
-  font-size: 12px;
-}
-
-.debug-log li:last-child {
-  border-bottom: none;
-}
-
-.debug-log em {
-  flex: none;
-  width: 40px;
-  font-style: normal;
-  color: #8f959e;
-}
-
-.mono {
-  font-family: Consolas, "Cascadia Mono", monospace;
-}
-
-.debug-json {
-  margin: 0;
-  padding: 8px;
-  max-height: 220px;
-  overflow: auto;
-  background: #f7f8fa;
-  border-radius: 4px;
-  font-size: 12px;
-  white-space: pre-wrap;
-}
-
-.caption {
-  margin: 0;
-  color: #8f959e;
-  font-size: 12px;
-}
-
-.course-card {
-  margin-top: 16px;
-}
-
-.course-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 8px;
-}
-
-.course-head h2 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
 }
 
 .course-list {
   border: 1px solid #eff0f1;
   border-radius: 4px;
-  margin: 8px 0;
+  margin: 10px 0;
 }
 
 .course-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   padding: 6px 10px;
   border-bottom: 1px solid #f5f6f7;
   font-size: 13px;
@@ -1063,7 +951,7 @@ onUnmounted(() => {
 
 .course-index {
   flex: none;
-  width: 24px;
+  width: 22px;
   color: #8f959e;
 }
 
@@ -1077,7 +965,7 @@ onUnmounted(() => {
 
 .course-teacher {
   flex: none;
-  width: 100px;
+  width: 80px;
   color: #646a73;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1093,7 +981,7 @@ onUnmounted(() => {
 .course-summary {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
+  gap: 14px;
   margin: 10px 0;
   color: #646a73;
   font-size: 13px;
@@ -1132,7 +1020,7 @@ onUnmounted(() => {
   margin: 8px 0 0;
   padding: 0;
   list-style: none;
-  max-height: 300px;
+  max-height: 280px;
   overflow: auto;
 }
 
@@ -1182,6 +1070,82 @@ onUnmounted(() => {
   font-size: 13px;
 }
 
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px 16px;
+  margin: 12px 0;
+}
+
+.debug-grid > div {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+.debug-grid span {
+  flex: none;
+  width: 76px;
+  color: #8f959e;
+  font-size: 13px;
+}
+
+.debug-grid b {
+  font-weight: 400;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.card h3 {
+  margin: 16px 0 8px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.debug-log {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 200px;
+  overflow: auto;
+  border: 1px solid #eff0f1;
+  border-radius: 4px;
+}
+
+.debug-log li {
+  display: flex;
+  gap: 8px;
+  padding: 4px 8px;
+  border-bottom: 1px solid #f5f6f7;
+  font-size: 12px;
+}
+
+.debug-log li:last-child {
+  border-bottom: none;
+}
+
+.debug-log em {
+  flex: none;
+  width: 40px;
+  font-style: normal;
+  color: #8f959e;
+}
+
+.mono {
+  font-family: Consolas, "Cascadia Mono", monospace;
+}
+
+.debug-json {
+  margin: 0;
+  padding: 8px;
+  max-height: 220px;
+  overflow: auto;
+  background: #f7f8fa;
+  border-radius: 4px;
+  font-size: 12px;
+  white-space: pre-wrap;
+}
+
 .notice {
   margin: 16px 0 0;
   padding: 8px 12px;
@@ -1206,9 +1170,14 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-@media (max-width: 760px) {
-  .layout {
-    grid-template-columns: minmax(0, 1fr);
+@media (max-width: 600px) {
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .course-teacher {
+    display: none;
   }
 }
 </style>
