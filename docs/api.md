@@ -69,6 +69,7 @@
 | loggedIn | boolean | `state/auth/cookies.json` 里是否有 cookie |
 | cookieCount | number | cookie 条数 |
 | account | string | 已保存凭据里的账号（打码） |
+| accountTail | string | 账号最后 3 位，顶栏只显示这个尾号 |
 | credSaved | boolean | 是否有可用凭据 |
 | credEncrypted | boolean | 凭据是否为加密格式 |
 | hasTarget | boolean | 是否已有 `state/course/target.json` 课程配置 |
