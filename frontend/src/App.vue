@@ -1,5 +1,5 @@
 <script setup>
-import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
+import {computed, onMounted, onUnmounted, ref} from 'vue'
 import {
   AppMode,
   CancelQRLogin,
@@ -19,17 +19,25 @@ import {
 } from '../wailsjs/go/main/App'
 import {EventsOff, EventsOn} from '../wailsjs/runtime/runtime'
 
-const page = ref('login')
+const TITLES = [
+  '今天打算刷什么？',
+  '今天从哪门课开始？',
+  '先把任务点清一清',
+  '该刷课了',
+]
+
+const page = ref('home')
+const title = ref(TITLES[0])
 const mode = ref({mode: 'release', debug: false, version: ''})
-const tab = ref('qr')
-const view = ref('login')
-const justLoggedIn = ref(false)
 const session = ref(null)
 const notice = ref('')
 const noticeKind = ref('info')
+const menuOpen = ref(false)
 
+const view = ref('login')
+const justLoggedIn = ref(false)
+const tab = ref('qr')
 const qrImage = ref('')
-const qrState = ref('idle')
 const qrMessage = ref('')
 const qrRemain = ref(0)
 const qrBusy = ref(false)
@@ -43,9 +51,7 @@ const captchaCode = ref('')
 const captchaBusy = ref(false)
 const loginBusy = ref(false)
 const checkBusy = ref(false)
-const logoutBusy = ref(false)
 const checkMessage = ref('')
-const logoutAll = ref(false)
 
 const courseList = ref([])
 const courseDetail = ref(null)
@@ -59,8 +65,15 @@ const debugBusy = ref(false)
 
 const loggedIn = computed(() => !!(session.value && session.value.loggedIn))
 const account = computed(() => (session.value && session.value.account) || '')
+const accountTail = computed(() => (session.value && session.value.accountTail) || '')
 const hasCourse = computed(() => !!(courseDetail.value && courseDetail.value.hasCourse))
 const prettySession = computed(() => (session.value ? JSON.stringify(session.value, null, 2) : ''))
+const lastDebugMessage = computed(() => {
+  if (!debugLog.value.length) {
+    return '暂无调用记录'
+  }
+  return debugLog.value[debugLog.value.length - 1].message
+})
 const currentCourseID = computed(() => {
   if (!courseDetail.value || !courseDetail.value.target) {
     return ''
@@ -99,12 +112,34 @@ function setNotice(message, kind) {
   noticeKind.value = kind || 'info'
 }
 
+function closeMenu() {
+  menuOpen.value = false
+}
+
+function toggleMenu() {
+  menuOpen.value = !menuOpen.value
+}
+
+function onDocumentClick() {
+  closeMenu()
+}
+
+function onKeydown(e) {
+  if (e.key === 'Escape') {
+    closeMenu()
+  }
+}
+
 function showPage(name) {
   if (name === 'debug' && !mode.value.debug) {
     return
   }
   page.value = name
+  closeMenu()
   setNotice('')
+  if (name === 'login' && !loggedIn.value && !qrImage.value) {
+    generateQr()
+  }
   if (name === 'course' && loggedIn.value) {
     if (!courseDetail.value) {
       loadCourseDetail()
@@ -113,9 +148,17 @@ function showPage(name) {
       loadCourses(true)
     }
   }
-  if (name === 'debug') {
+  if ((name === 'home' || name === 'debug') && mode.value.debug) {
     refreshDebug()
   }
+}
+
+function openCourse() {
+  if (!loggedIn.value) {
+    showPage('login')
+    return
+  }
+  showPage('course')
 }
 
 function stopQrTimer() {
@@ -139,12 +182,7 @@ function startQrTimer() {
 
 async function refreshSession() {
   try {
-    const s = await SessionStatus()
-    session.value = s
-    if (s.loggedIn && view.value !== 'success') {
-      view.value = 'success'
-      justLoggedIn.value = false
-    }
+    session.value = await SessionStatus()
   } catch (e) {
     setNotice('读取登录状态失败: ' + friendly(e), 'error')
   }
@@ -169,7 +207,7 @@ async function clearDebug() {
   try {
     await ClearDebugLog()
   } catch (e) {
-    // 忽略清空失败，下面刷新会显示实际情况
+    // 清空失败时保留原日志，刷新后会显示实际状态
   }
   debugLog.value = []
   refreshDebug()
@@ -186,11 +224,9 @@ async function generateQr() {
   try {
     const res = await StartQRLogin()
     qrImage.value = res.image
-    qrState.value = 'waiting'
     qrRemain.value = Math.max(0, res.expiresAt - Math.floor(Date.now() / 1000))
     startQrTimer()
   } catch (e) {
-    qrState.value = 'error'
     qrMessage.value = friendly(e)
     setNotice('二维码获取失败: ' + friendly(e), 'error')
   } finally {
@@ -206,14 +242,12 @@ async function cancelQr() {
     setNotice('取消扫码失败: ' + friendly(e), 'error')
   }
   stopQrTimer()
-  qrState.value = 'idle'
   qrRemain.value = 0
   qrImage.value = ''
   qrMessage.value = ''
 }
 
 function onQrEvent(ev) {
-  qrState.value = ev.state
   qrMessage.value = ev.message
   if (ev.state === 'scanned') {
     qrRemain.value = 0
@@ -241,7 +275,6 @@ function onQrEvent(ev) {
 async function handleLoginSuccess(message) {
   justLoggedIn.value = true
   view.value = 'success'
-  page.value = 'login'
   setNotice(message, 'ok')
   await refreshSession()
   await loadCourseDetail()
@@ -306,14 +339,13 @@ async function checkSession() {
 }
 
 async function doLogout() {
-  logoutBusy.value = true
+  closeMenu()
   try {
-    const res = await Logout(logoutAll.value)
-    justLoggedIn.value = false
+    const res = await Logout(false)
     view.value = 'login'
-    page.value = 'login'
+    justLoggedIn.value = false
+    page.value = 'home'
     qrImage.value = ''
-    qrState.value = 'idle'
     qrMessage.value = ''
     checkMessage.value = ''
     courseList.value = []
@@ -321,13 +353,9 @@ async function doLogout() {
     courseError.value = ''
     setNotice(res.message, 'ok')
     await refreshSession()
-    if (!loggedIn.value) {
-      generateQr()
-    }
   } catch (e) {
     setNotice('退出登录失败: ' + friendly(e), 'error')
   } finally {
-    logoutBusy.value = false
     refreshDebug()
   }
 }
@@ -408,6 +436,7 @@ function formatDuration(seconds) {
 }
 
 async function bootstrap() {
+  title.value = TITLES[Math.floor(Math.random() * TITLES.length)]
   try {
     mode.value = await AppMode()
   } catch (e) {
@@ -416,23 +445,19 @@ async function bootstrap() {
   await refreshSession()
   if (loggedIn.value) {
     loadCourseDetail()
-  } else {
-    generateQr()
   }
-  refreshDebug()
+  if (mode.value.debug) {
+    refreshDebug()
+  }
 }
 
 let offQr = null
 
-watch(tab, (val) => {
-  if (val === 'pw' && !captchaImage.value) {
-    refreshCaptcha()
-  }
-})
-
 onMounted(() => {
   bootstrap()
   offQr = EventsOn('login:qr', onQrEvent)
+  document.addEventListener('click', onDocumentClick)
+  window.addEventListener('keydown', onKeydown)
 })
 
 onUnmounted(() => {
@@ -442,131 +467,152 @@ onUnmounted(() => {
   } else {
     EventsOff('login:qr')
   }
+  document.removeEventListener('click', onDocumentClick)
+  window.removeEventListener('keydown', onKeydown)
 })
 </script>
 
 <template>
   <div class="app">
     <header class="topbar">
-      <div class="brand">
-        <span class="logo">hsc</span>
-        <span class="brand-name">课程助手</span>
-        <span class="version">v{{ mode.version }}</span>
-        <span v-if="mode.debug" class="badge">debug</span>
+      <div class="bar-left">
+        <button v-if="page !== 'home'" class="back-btn" @click="showPage('home')">返回</button>
+        <button class="brand" @click="showPage('home')" aria-label="回到首页">
+          <span class="wordmark">hsc</span>
+          <span class="dim">课程助手</span>
+        </button>
       </div>
-      <nav class="nav">
-        <button :class="{active: page === 'login'}" @click="showPage('login')">登录</button>
-        <button :class="{active: page === 'course'}" @click="showPage('course')">课程</button>
-        <button v-if="mode.debug" :class="{active: page === 'debug'}" @click="showPage('debug')">调试</button>
-      </nav>
+
+      <div class="bar-right">
+        <template v-if="loggedIn">
+          <div class="user-menu" @click.stop>
+            <button class="account-btn" @click="toggleMenu">尾号 {{ accountTail || '—' }}</button>
+            <div v-if="menuOpen" class="menu" role="menu">
+              <div class="menu-row"><span>账号</span><span class="v">{{ account || '未保存' }}</span></div>
+              <div class="menu-row"><span>登录状态</span><span class="v">{{ loggedIn ? '有效' : '无' }}</span></div>
+              <div class="menu-row"><span>记住账号</span><span class="v">{{ session && session.credSaved ? '已保存' : '未保存' }}</span></div>
+              <div class="menu-row"><span>课程</span><span class="v">{{ session && session.hasTarget ? '已配置' : '未配置' }}</span></div>
+              <button class="menu-danger" @click="doLogout">退出登录</button>
+            </div>
+          </div>
+          <span v-if="mode.debug" class="debug-tag">debug</span>
+        </template>
+        <button v-else-if="page !== 'login'" class="login-btn" @click="showPage('login')">登录</button>
+      </div>
     </header>
 
-    <main class="content">
-      <!-- 登录页 -->
-      <section v-if="page === 'login'" class="card">
-        <template v-if="view === 'success'">
-          <p class="page-title">{{ justLoggedIn ? '登录成功' : '已登录' }}</p>
-          <p class="page-sub">{{ account ? '账号 ' + account : '登录态已保存到本机' }}</p>
+    <main v-if="page === 'home'" class="home">
+      <h1 class="home-title">{{ title }}</h1>
+      <nav class="cards" aria-label="页面导航">
+        <button class="card" :class="{disabled: !loggedIn}" @click="openCourse">
+          <h2>课程</h2>
+          <p>{{ loggedIn ? '课程列表与任务点' : '课程列表与任务点，登录后可用' }}</p>
+        </button>
+        <button class="card" @click="showPage('about')">
+          <h2>关于</h2>
+          <p>版本与说明</p>
+        </button>
+        <button v-if="mode.debug" class="card" @click="showPage('debug')">
+          <h2>调试</h2>
+          <p>环境与调用日志</p>
+        </button>
+      </nav>
 
-          <dl class="facts">
-            <div>
-              <dt>登录状态</dt>
-              <dd>{{ loggedIn ? '有效' : '无' }}</dd>
-            </div>
-            <div>
-              <dt>记住账号</dt>
-              <dd>{{ session && session.credSaved ? '已保存' : '未保存' }}</dd>
-            </div>
-            <div>
-              <dt>课程信息</dt>
-              <dd>{{ session && session.hasTarget ? '已配置课程' : '未配置课程' }}</dd>
-            </div>
-            <template v-if="mode.debug">
-              <div>
-                <dt>state 目录</dt>
-                <dd class="mono">{{ session ? session.stateDir : '' }}</dd>
-              </div>
-              <div>
-                <dt>cookie 数量</dt>
-                <dd>{{ session ? session.cookieCount : 0 }}</dd>
-              </div>
-            </template>
-          </dl>
-
-          <div class="actions">
-            <button class="primary" @click="showPage('course')">进入课程</button>
-            <button @click="checkSession" :disabled="checkBusy">{{ checkBusy ? '检查中' : '检查会话' }}</button>
-            <button @click="doLogout" :disabled="logoutBusy">{{ logoutBusy ? '退出中' : '退出登录' }}</button>
-          </div>
-          <label class="check"><input v-model="logoutAll" type="checkbox"/> 同时删除已保存凭据</label>
-          <p v-if="checkMessage" class="muted">{{ checkMessage }}</p>
-        </template>
-
-        <template v-else>
-          <div class="tabs">
-            <button :class="{active: tab === 'qr'}" @click="tab = 'qr'">扫码登录</button>
-            <button :class="{active: tab === 'pw'}" @click="tab = 'pw'">账号密码登录</button>
-          </div>
-
-          <div v-if="tab === 'qr'" class="pane">
-            <p class="hint">用企业微信或「华中大微校园」扫一扫，二维码 3 分钟内有效。</p>
-            <div v-if="qrImage" class="qr-wrap">
-              <img class="qr" :src="qrImage" alt="登录二维码"/>
-              <p class="muted">
-                {{ qrMessage || '等待扫码' }}<span v-if="qrRemain > 0">，剩余 {{ qrRemain }} 秒</span>
-              </p>
-            </div>
-            <p v-else class="qr-empty">{{ qrBusy ? '正在获取二维码' : '准备二维码' }}</p>
-            <div class="actions">
-              <button class="primary" @click="generateQr" :disabled="qrBusy">
-                {{ qrImage ? '重新生成二维码' : '生成二维码' }}
-              </button>
-              <button v-if="qrImage" @click="cancelQr">取消</button>
-            </div>
-          </div>
-
-          <div v-else class="pane">
-            <div class="field">
-              <label for="username">学号 / 账号</label>
-              <input id="username" v-model="username" type="text" autocomplete="username" placeholder="输入学号或账号"/>
-            </div>
-            <div class="field">
-              <label for="password">密码</label>
-              <input id="password" v-model="password" type="password" autocomplete="current-password" placeholder="输入密码"/>
-            </div>
-            <div class="captcha-row">
-              <div class="captcha-box">
-                <img v-if="captchaImage" class="captcha" :src="captchaImage" alt="验证码" title="点击换一张" @click="refreshCaptcha"/>
-                <span v-else class="muted">验证码未获取</span>
-              </div>
-              <div class="captcha-side">
-                <div class="captcha-actions">
-                  <button @click="refreshCaptcha" :disabled="captchaBusy">{{ captchaBusy ? '获取中' : '换一张' }}</button>
-                  <input v-model="captchaCode" class="captcha-input" type="text" maxlength="4" placeholder="4 位验证码"/>
-                </div>
-                <p class="hint">{{ captchaHint }}</p>
-              </div>
-            </div>
-            <div class="actions">
-              <button class="primary" @click="submitPassword" :disabled="loginBusy">{{ loginBusy ? '登录中' : '登录' }}</button>
-            </div>
-          </div>
-        </template>
+      <section v-if="mode.debug" class="debug-info" aria-label="调试信息">
+        <div class="row">
+          <span class="k">版本</span>
+          <span class="v">{{ mode.version }} · {{ mode.mode }}</span>
+        </div>
+        <div class="row">
+          <span class="k">state 目录</span>
+          <span class="v mono">{{ (debugInfo && debugInfo.stateDir) || (session && session.stateDir) || '—' }}</span>
+        </div>
+        <div class="row">
+          <span class="k">最近调用</span>
+          <span class="v">{{ lastDebugMessage }}</span>
+        </div>
       </section>
+    </main>
 
-      <!-- 课程页 -->
-      <section v-else-if="page === 'course'" class="card">
-        <template v-if="!loggedIn">
-          <p class="page-title">还没有登录</p>
-          <p class="hint">登录后才能查看课程列表和任务点。</p>
-          <div class="actions">
-            <button class="primary" @click="showPage('login')">去登录</button>
-          </div>
+    <main v-else class="subpage">
+      <section class="panel">
+        <template v-if="page === 'login'">
+          <template v-if="view === 'success'">
+            <p class="page-title-sm">{{ justLoggedIn ? '登录成功' : '已登录' }}</p>
+            <p class="page-sub">{{ account ? '账号 ' + account : '登录态已保存到本机' }}</p>
+            <dl class="facts">
+              <div><dt>登录状态</dt><dd>{{ loggedIn ? '有效' : '无' }}</dd></div>
+              <div><dt>记住账号</dt><dd>{{ session && session.credSaved ? '已保存' : '未保存' }}</dd></div>
+              <div><dt>课程</dt><dd>{{ session && session.hasTarget ? '已配置' : '未配置' }}</dd></div>
+              <template v-if="mode.debug">
+                <div><dt>state 目录</dt><dd class="mono">{{ session ? session.stateDir : '' }}</dd></div>
+                <div><dt>cookie 数量</dt><dd>{{ session ? session.cookieCount : 0 }}</dd></div>
+              </template>
+            </dl>
+            <div class="actions">
+              <button class="primary" @click="showPage('home')">回首页</button>
+              <button @click="checkSession" :disabled="checkBusy">{{ checkBusy ? '检查中' : '检查会话' }}</button>
+            </div>
+            <p v-if="checkMessage" class="hint">{{ checkMessage }}</p>
+          </template>
+
+          <template v-else>
+            <p class="page-title-sm">登录</p>
+            <p class="page-sub">用企业微信扫码，或账号密码登录。</p>
+
+            <div class="tabs">
+              <button :class="{active: tab === 'qr'}" @click="tab = 'qr'">扫码登录</button>
+              <button :class="{active: tab === 'pw'}" @click="tab = 'pw'; refreshCaptcha()">账号密码登录</button>
+            </div>
+
+            <div v-if="tab === 'qr'" class="pane">
+              <div v-if="qrImage" class="qr-wrap">
+                <img class="qr" :src="qrImage" alt="登录二维码"/>
+                <p class="hint">
+                  {{ qrMessage || '等待扫码' }}<span v-if="qrRemain > 0">，剩余 {{ qrRemain }} 秒</span>
+                </p>
+              </div>
+              <p v-else class="qr-empty">{{ qrBusy ? '正在获取二维码' : '准备二维码' }}</p>
+              <div class="actions">
+                <button class="primary" @click="generateQr" :disabled="qrBusy">
+                  {{ qrImage ? '重新生成二维码' : '生成二维码' }}
+                </button>
+                <button v-if="qrImage" @click="cancelQr">取消</button>
+              </div>
+            </div>
+
+            <div v-else class="pane">
+              <div class="field">
+                <label for="username">学号 / 账号</label>
+                <input id="username" v-model="username" type="text" autocomplete="username" placeholder="输入学号或账号"/>
+              </div>
+              <div class="field">
+                <label for="password">密码</label>
+                <input id="password" v-model="password" type="password" autocomplete="current-password" placeholder="输入密码"/>
+              </div>
+              <div class="captcha-row">
+                <div class="captcha-box">
+                  <img v-if="captchaImage" class="captcha" :src="captchaImage" alt="验证码" title="点击换一张" @click="refreshCaptcha"/>
+                  <span v-else class="hint">验证码未获取</span>
+                </div>
+                <div class="captcha-side">
+                  <div class="captcha-actions">
+                    <button @click="refreshCaptcha" :disabled="captchaBusy">{{ captchaBusy ? '获取中' : '换一张' }}</button>
+                    <input v-model="captchaCode" class="captcha-input" type="text" maxlength="4" placeholder="4 位验证码"/>
+                  </div>
+                  <p class="hint">{{ captchaHint }}</p>
+                </div>
+              </div>
+              <div class="actions">
+                <button class="primary" @click="submitPassword" :disabled="loginBusy">{{ loginBusy ? '登录中' : '登录' }}</button>
+              </div>
+            </div>
+          </template>
         </template>
 
-        <template v-else>
+        <template v-else-if="page === 'course'">
           <div class="page-head">
-            <h2>我的课程</h2>
+            <p class="page-title-sm">课程</p>
             <div class="actions">
               <button @click="loadCourses(true)" :disabled="courseLoading || courseBusy">
                 {{ courseLoading ? '获取中' : '获取课程列表' }}
@@ -604,22 +650,22 @@ onUnmounted(() => {
               <details v-for="ch in courseDetail.chapters" :key="ch.id" class="chapter" :open="ch.index <= 2">
                 <summary>
                   <span class="chapter-name">{{ ch.title || ('章节 ' + ch.index) }}</span>
-                  <span class="muted">视频 {{ ch.videosPassed }}/{{ ch.videos }}，作业 {{ ch.works }}</span>
+                  <span class="hint">视频 {{ ch.videosPassed }}/{{ ch.videos }}，作业 {{ ch.works }}</span>
                 </summary>
                 <ul class="task-list">
                   <li v-for="(v, index) in videosByChapter[ch.id] || []" :key="'v' + ch.id + index">
                     <span class="task-tag">视频</span>
                     <span class="task-title">{{ v.title || '未命名视频' }}</span>
-                    <span class="muted">{{ formatDuration(v.duration) }}</span>
+                    <span class="hint">{{ formatDuration(v.duration) }}</span>
                     <span v-if="v.isPassed" class="ok-text">已完成</span>
-                    <span v-else class="muted">未完成</span>
-                    <span v-if="v.speedLimited" class="muted">限 1 倍速</span>
+                    <span v-else class="hint">未完成</span>
+                    <span v-if="v.speedLimited" class="hint">限 1 倍速</span>
                   </li>
                   <li v-for="(w, index) in worksByChapter[ch.id] || []" :key="'w' + ch.id + index">
                     <span class="task-tag">作业</span>
                     <span class="task-title">{{ w.title || '未命名作业' }}</span>
                   </li>
-                  <li v-if="!((videosByChapter[ch.id] || []).length || (worksByChapter[ch.id] || []).length)" class="muted">
+                  <li v-if="!((videosByChapter[ch.id] || []).length || (worksByChapter[ch.id] || []).length)" class="hint">
                     本章没有可展示的任务点
                   </li>
                 </ul>
@@ -627,142 +673,373 @@ onUnmounted(() => {
             </div>
           </template>
         </template>
-      </section>
 
-      <!-- 调试页（仅 debug 构建） -->
-      <section v-else-if="page === 'debug' && mode.debug" class="card">
-        <div class="page-head">
-          <h2>调试信息</h2>
+        <template v-else-if="page === 'about'">
+          <p class="page-title-sm">关于</p>
+          <dl class="facts">
+            <div><dt>版本</dt><dd>{{ mode.version }}（{{ mode.mode }}）</dd></div>
+            <div><dt>登录态</dt><dd>与 hsc 命令行共用，保存在 state 目录</dd></div>
+            <div><dt>数据</dt><dd>登录信息只保存在本机，不上传账号</dd></div>
+            <template v-if="mode.debug">
+              <div><dt>state 目录</dt><dd class="mono">{{ session ? session.stateDir : '—' }}</dd></div>
+            </template>
+          </dl>
           <div class="actions">
-            <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
-            <button @click="clearDebug">清空日志</button>
+            <button class="primary" @click="showPage('home')">回首页</button>
           </div>
-        </div>
+        </template>
 
-        <div v-if="debugInfo" class="debug-grid">
-          <div><span>模式</span><b>{{ debugInfo.mode }}</b></div>
-          <div><span>state 目录</span><b class="mono">{{ debugInfo.stateDir }}</b></div>
-          <div><span>工作目录</span><b class="mono">{{ debugInfo.cwd }}</b></div>
-          <div><span>可执行文件</span><b class="mono">{{ debugInfo.exePath }}</b></div>
-          <div><span>Go 版本</span><b>{{ debugInfo.goVersion }}</b></div>
-          <div><span>系统</span><b>{{ debugInfo.os }}/{{ debugInfo.arch }}</b></div>
-          <div><span>cookie 数量</span><b>{{ debugInfo.cookieCount }}</b></div>
-          <div><span>登录态</span><b>{{ debugInfo.loggedIn ? '存在' : '无' }}</b></div>
-        </div>
+        <template v-else-if="page === 'debug' && mode.debug">
+          <div class="page-head">
+            <p class="page-title-sm">调试</p>
+            <div class="actions">
+              <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
+              <button @click="clearDebug">清空日志</button>
+            </div>
+          </div>
 
-        <h3>最近日志</h3>
-        <ul class="debug-log">
-          <li v-for="(entry, index) in debugLog" :key="index">
-            <span class="mono">{{ entry.time }}</span>
-            <em>{{ entry.kind }}</em>
-            <span>{{ entry.message }}</span>
-          </li>
-        </ul>
-        <p v-if="!debugLog.length" class="hint">暂无日志</p>
+          <div v-if="debugInfo" class="debug-grid">
+            <div><span>模式</span><b>{{ debugInfo.mode }}</b></div>
+            <div><span>state 目录</span><b class="mono">{{ debugInfo.stateDir }}</b></div>
+            <div><span>工作目录</span><b class="mono">{{ debugInfo.cwd }}</b></div>
+            <div><span>可执行文件</span><b class="mono">{{ debugInfo.exePath }}</b></div>
+            <div><span>Go 版本</span><b>{{ debugInfo.goVersion }}</b></div>
+            <div><span>系统</span><b>{{ debugInfo.os }}/{{ debugInfo.arch }}</b></div>
+            <div><span>cookie 数量</span><b>{{ debugInfo.cookieCount }}</b></div>
+            <div><span>登录态</span><b>{{ debugInfo.loggedIn ? '存在' : '无' }}</b></div>
+          </div>
 
-        <h3>原始会话状态</h3>
-        <pre class="debug-json">{{ prettySession }}</pre>
+          <h3>最近日志</h3>
+          <ul class="debug-log">
+            <li v-for="(entry, index) in debugLog" :key="index">
+              <span class="mono">{{ entry.time }}</span>
+              <em>{{ entry.kind }}</em>
+              <span>{{ entry.message }}</span>
+            </li>
+          </ul>
+          <p v-if="!debugLog.length" class="hint">暂无日志</p>
+
+          <h3>原始会话状态</h3>
+          <pre class="debug-json">{{ prettySession }}</pre>
+        </template>
       </section>
     </main>
 
     <p v-if="notice" class="notice" :class="noticeKind">{{ notice }}</p>
-    <footer class="footer">登录信息只保存在本机，和 hsc 命令行共用。</footer>
   </div>
 </template>
 
 <style scoped>
 .app {
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 20px 16px 24px;
-  box-sizing: border-box;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
 }
 
+/* 顶栏 */
 .topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid #dee0e3;
+  height: 52px;
+  padding: 0 24px;
+  background: rgba(245, 245, 247, 0.72);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.bar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.back-btn {
+  border: none;
+  background: transparent;
+  color: var(--link);
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.back-btn:hover {
+  background: rgba(0, 0, 0, 0.05);
 }
 
 .brand {
-  display: flex;
+  display: inline-flex;
   align-items: baseline;
   gap: 6px;
-}
-
-.logo {
-  font-size: 20px;
-  font-weight: 700;
-  color: #3370ff;
-}
-
-.brand-name {
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.version {
-  color: #8f959e;
-  font-size: 12px;
-}
-
-.badge {
-  border: 1px solid #f5a623;
-  border-radius: 10px;
-  padding: 0 6px;
-  color: #a35c00;
-  background: #fff7e6;
-  font-size: 12px;
-}
-
-.nav {
-  display: flex;
-  gap: 4px;
-}
-
-.nav button {
   border: none;
   background: transparent;
-  padding: 6px 12px;
-  border-radius: 4px;
-  color: #646a73;
+  padding: 4px 2px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
 }
 
-.nav button:hover:not(:disabled) {
-  background: #f2f3f5;
-  color: #1f2329;
+.wordmark {
+  color: var(--link);
+  font-weight: 700;
 }
 
-.nav button.active {
-  background: #eaf1ff;
-  color: #3370ff;
-  font-weight: 500;
+.dim {
+  color: var(--muted);
+  font-weight: 400;
 }
 
-.content {
-  margin-top: 16px;
+.bar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.user-menu {
+  position: relative;
+}
+
+.account-btn {
+  border: none;
+  background: transparent;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: var(--radius-pill);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.account-btn:hover,
+.account-btn:focus-visible {
+  background: rgba(0, 0, 0, 0.05);
+  outline: none;
+}
+
+.menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 30;
+  width: 232px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.14);
+}
+
+.menu-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.menu-row .v {
+  color: var(--text);
+  text-align: right;
+  word-break: break-all;
+}
+
+.menu-danger {
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px;
+  border: none;
+  border-top: 1px solid var(--line-soft);
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  background: transparent;
+  color: var(--danger);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-danger:hover {
+  background: #fff2f2;
+}
+
+.debug-tag {
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.login-btn {
+  height: 28px;
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  color: #ffffff;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.login-btn:hover {
+  background: var(--primary-hover);
+}
+
+/* 首页 */
+.home {
+  flex: 1 0 auto;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 24px 40px;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+
+.home-title {
+  margin: 0 0 120px;
+  font-size: 40px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  text-align: center;
+  text-wrap: balance;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto;
 }
 
 .card {
-  background: #ffffff;
-  border: 1px solid #dee0e3;
-  border-radius: 8px;
-  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 104px;
+  padding: 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.card:hover {
+  background: var(--surface-2);
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.card p {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.card.disabled {
+  background: #fafafc;
+  box-shadow: none;
+}
+
+.card.disabled h2,
+.card.disabled p {
+  color: #b0b0b5;
+}
+
+.card.disabled:hover {
+  background: #fafafc;
+  border-color: var(--line-soft);
+  box-shadow: none;
+}
+
+.debug-info {
+  width: 100%;
+  max-width: 560px;
+  margin: 16px auto 0;
+  padding: 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  font-size: 12px;
+  color: var(--muted);
   box-sizing: border-box;
 }
 
-.page-title {
-  margin: 0 0 4px;
-  font-size: 26px;
-  font-weight: 600;
+.debug-info .row {
+  display: flex;
+  gap: 12px;
+  padding: 2px 0;
+}
+
+.debug-info .k {
+  flex: none;
+  width: 76px;
+  color: var(--muted-2);
+}
+
+.debug-info .v {
+  min-width: 0;
+  word-break: break-all;
+}
+
+/* 子页面 */
+.subpage {
+  flex: 1 0 auto;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 32px 24px 40px;
+  box-sizing: border-box;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.page-title-sm {
+  margin: 0 0 6px;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .page-sub {
-  margin: 0 0 16px;
-  color: #646a73;
+  margin: 0 0 18px;
+  color: var(--muted);
 }
 
 .page-head {
@@ -770,43 +1047,80 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 12px;
 }
 
-.page-head h2 {
+.page-head .page-title-sm {
   margin: 0;
-  font-size: 18px;
-  font-weight: 600;
 }
 
 .tabs {
   display: flex;
   gap: 4px;
-  margin-bottom: 16px;
+  margin: 0 0 16px;
 }
 
 .tabs button {
   border: none;
   background: transparent;
   padding: 6px 12px;
-  border-radius: 4px;
-  color: #646a73;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 14px;
+  cursor: pointer;
 }
 
 .tabs button.active {
   background: #eaf1ff;
-  color: #3370ff;
+  color: var(--primary);
   font-weight: 500;
 }
 
-.pane {
-  min-height: 260px;
+.actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
-.hint {
-  margin: 0 0 12px;
-  color: #8f959e;
+button.primary {
+  height: 32px;
+  padding: 0 16px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: var(--primary);
+  color: #ffffff;
   font-size: 13px;
+  cursor: pointer;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--primary-hover);
+}
+
+button.primary:disabled {
+  background: #b9d4ff;
+  cursor: default;
+}
+
+.actions button:not(.primary),
+.tabs button,
+.captcha-actions button,
+.course-row button {
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.actions button:not(.primary):hover:not(:disabled),
+.captcha-actions button:hover:not(:disabled),
+.course-row button:hover:not(:disabled) {
+  background: var(--surface-2);
 }
 
 .qr-wrap {
@@ -820,24 +1134,14 @@ onUnmounted(() => {
 .qr {
   width: 200px;
   height: 200px;
-  border: 1px solid #dee0e3;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
 }
 
 .qr-empty {
   margin: 24px 0;
   text-align: center;
-  color: #8f959e;
-}
-
-.actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.actions button {
-  flex: none;
+  color: var(--muted);
 }
 
 .field {
@@ -848,12 +1152,23 @@ onUnmounted(() => {
 }
 
 .field label {
-  color: #646a73;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .field input {
-  width: 100%;
-  box-sizing: border-box;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  outline: none;
+}
+
+.field input:focus {
+  border-color: var(--primary);
 }
 
 .captcha-row {
@@ -866,8 +1181,8 @@ onUnmounted(() => {
 .captcha-box {
   width: 110px;
   height: 42px;
-  border: 1px solid #dee0e3;
-  border-radius: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -895,13 +1210,29 @@ onUnmounted(() => {
 
 .captcha-input {
   width: 110px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  outline: none;
+}
+
+.captcha-input:focus {
+  border-color: var(--primary);
+}
+
+.hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .facts {
-  margin: 0 0 16px;
+  margin: 16px 0 20px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .facts > div {
@@ -911,8 +1242,9 @@ onUnmounted(() => {
 
 .facts dt {
   flex: none;
-  width: 80px;
-  color: #8f959e;
+  width: 84px;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .facts dd {
@@ -921,26 +1253,17 @@ onUnmounted(() => {
   word-break: break-all;
 }
 
-.check {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 10px;
-  color: #646a73;
-  font-size: 12px;
-}
-
 .course-list {
-  border: 1px solid #eff0f1;
-  border-radius: 4px;
-  margin: 10px 0;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  margin: 8px 0;
 }
 
 .course-row {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 6px 10px;
+  padding: 8px 12px;
   border-bottom: 1px solid #f5f6f7;
   font-size: 13px;
 }
@@ -952,7 +1275,7 @@ onUnmounted(() => {
 .course-index {
   flex: none;
   width: 22px;
-  color: #8f959e;
+  color: var(--muted);
 }
 
 .course-name {
@@ -966,7 +1289,7 @@ onUnmounted(() => {
 .course-teacher {
   flex: none;
   width: 80px;
-  color: #646a73;
+  color: var(--muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -975,7 +1298,7 @@ onUnmounted(() => {
 .course-current {
   flex: none;
   font-size: 12px;
-  color: #3370ff;
+  color: var(--primary);
 }
 
 .course-summary {
@@ -983,12 +1306,12 @@ onUnmounted(() => {
   flex-wrap: wrap;
   gap: 14px;
   margin: 10px 0;
-  color: #646a73;
+  color: var(--muted);
   font-size: 13px;
 }
 
 .course-summary b {
-  color: #1f2329;
+  color: var(--text);
   font-weight: 600;
 }
 
@@ -1000,9 +1323,9 @@ onUnmounted(() => {
 }
 
 .chapter {
-  border: 1px solid #eff0f1;
-  border-radius: 4px;
-  padding: 6px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
 }
 
 .chapter summary {
@@ -1034,9 +1357,9 @@ onUnmounted(() => {
 
 .task-tag {
   flex: none;
-  font-size: 12px;
-  color: #8f959e;
-  border: 1px solid #dee0e3;
+  font-size: 11px;
+  color: var(--muted);
+  border: 1px solid var(--line-soft);
   border-radius: 3px;
   padding: 0 4px;
 }
@@ -1047,10 +1370,6 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.muted {
-  color: #8f959e;
 }
 
 .ok-text {
@@ -1064,9 +1383,9 @@ onUnmounted(() => {
 .inline-error {
   margin: 8px 0;
   padding: 6px 10px;
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   background: #fde2e2;
-  color: #a61b1b;
+  color: var(--danger);
   font-size: 13px;
 }
 
@@ -1086,7 +1405,7 @@ onUnmounted(() => {
 .debug-grid span {
   flex: none;
   width: 76px;
-  color: #8f959e;
+  color: var(--muted);
   font-size: 13px;
 }
 
@@ -1096,7 +1415,7 @@ onUnmounted(() => {
   word-break: break-all;
 }
 
-.card h3 {
+.panel h3 {
   margin: 16px 0 8px;
   font-size: 14px;
   font-weight: 600;
@@ -1108,8 +1427,8 @@ onUnmounted(() => {
   list-style: none;
   max-height: 200px;
   overflow: auto;
-  border: 1px solid #eff0f1;
-  border-radius: 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
 }
 
 .debug-log li {
@@ -1128,7 +1447,7 @@ onUnmounted(() => {
   flex: none;
   width: 40px;
   font-style: normal;
-  color: #8f959e;
+  color: var(--muted);
 }
 
 .mono {
@@ -1140,44 +1459,53 @@ onUnmounted(() => {
   padding: 8px;
   max-height: 220px;
   overflow: auto;
-  background: #f7f8fa;
-  border-radius: 4px;
+  background: var(--surface-2);
+  border-radius: var(--radius-sm);
   font-size: 12px;
   white-space: pre-wrap;
 }
 
 .notice {
-  margin: 16px 0 0;
-  padding: 8px 12px;
-  border-radius: 4px;
-  background: #f2f3f5;
-  color: #1f2329;
+  position: fixed;
+  left: 50%;
+  bottom: 20px;
+  transform: translateX(-50%);
+  z-index: 50;
+  max-width: 80%;
+  padding: 8px 14px;
+  border-radius: var(--radius-pill);
+  background: rgba(29, 29, 31, 0.9);
+  color: #ffffff;
+  font-size: 13px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
 }
 
 .notice.error {
-  background: #fde2e2;
-  color: #a61b1b;
+  background: rgba(215, 0, 21, 0.92);
 }
 
 .notice.ok {
-  background: #e4f7e8;
-  color: #1a6b2f;
+  background: rgba(26, 107, 47, 0.92);
 }
 
-.footer {
-  margin-top: 20px;
-  color: #8f959e;
-  font-size: 12px;
-}
-
-@media (max-width: 600px) {
-  .topbar {
-    flex-direction: column;
-    align-items: flex-start;
+@media (max-width: 680px) {
+  .home-title {
+    margin-bottom: 80px;
+    font-size: 32px;
   }
 
-  .course-teacher {
-    display: none;
+  .topbar {
+    padding: 0 16px;
+  }
+
+  .subpage {
+    padding: 20px 16px 32px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    transition: none;
   }
 }
 </style>
