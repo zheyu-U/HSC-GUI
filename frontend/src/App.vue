@@ -102,6 +102,33 @@ const worksByChapter = computed(() => {
   }
   return map
 })
+const pageTitle = computed(() => {
+  if (page.value === 'login') {
+    if (view.value === 'success') {
+      return justLoggedIn.value ? '登录成功' : '已登录'
+    }
+    return '登录'
+  }
+  if (page.value === 'course') {
+    return '课程'
+  }
+  if (page.value === 'about') {
+    return '关于'
+  }
+  if (page.value === 'debug') {
+    return '调试'
+  }
+  return ''
+})
+const pageLead = computed(() => {
+  if (page.value === 'login') {
+    if (view.value === 'success') {
+      return account.value ? '账号 ' + account.value : '登录态已保存到本机'
+    }
+    return '用企业微信扫码，或账号密码登录。'
+  }
+  return ''
+})
 
 function friendly(e) {
   return String(e).replace(/^Error:\s*/, '')
@@ -535,11 +562,28 @@ onUnmounted(() => {
     </main>
 
     <main v-else class="subpage">
+      <header class="page-head">
+        <div class="page-head-text">
+          <h1 class="page-title">{{ pageTitle }}</h1>
+          <p v-if="pageLead" class="page-sub">{{ pageLead }}</p>
+        </div>
+        <div v-if="page === 'course'" class="actions">
+          <button @click="loadCourses(true)" :disabled="courseLoading || courseBusy">
+            {{ courseLoading ? '获取中' : '获取课程列表' }}
+          </button>
+          <button v-if="hasCourse" @click="refreshCourse" :disabled="courseBusy">
+            {{ courseBusy ? '抓取中' : '抓取课程结构' }}
+          </button>
+        </div>
+        <div v-else-if="page === 'debug' && mode.debug" class="actions">
+          <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
+          <button @click="clearDebug">清空日志</button>
+        </div>
+      </header>
+
       <section class="panel">
         <template v-if="page === 'login'">
           <template v-if="view === 'success'">
-            <p class="page-title-sm">{{ justLoggedIn ? '登录成功' : '已登录' }}</p>
-            <p class="page-sub">{{ account ? '账号 ' + account : '登录态已保存到本机' }}</p>
             <dl class="facts">
               <div><dt>登录状态</dt><dd>{{ loggedIn ? '有效' : '无' }}</dd></div>
               <div><dt>记住账号</dt><dd>{{ session && session.credSaved ? '已保存' : '未保存' }}</dd></div>
@@ -557,9 +601,6 @@ onUnmounted(() => {
           </template>
 
           <template v-else>
-            <p class="page-title-sm">登录</p>
-            <p class="page-sub">用企业微信扫码，或账号密码登录。</p>
-
             <div class="tabs">
               <button :class="{active: tab === 'qr'}" @click="tab = 'qr'">扫码登录</button>
               <button :class="{active: tab === 'pw'}" @click="tab = 'pw'; refreshCaptcha()">账号密码登录</button>
@@ -611,18 +652,6 @@ onUnmounted(() => {
         </template>
 
         <template v-else-if="page === 'course'">
-          <div class="page-head">
-            <p class="page-title-sm">课程</p>
-            <div class="actions">
-              <button @click="loadCourses(true)" :disabled="courseLoading || courseBusy">
-                {{ courseLoading ? '获取中' : '获取课程列表' }}
-              </button>
-              <button v-if="hasCourse" @click="refreshCourse" :disabled="courseBusy">
-                {{ courseBusy ? '抓取中' : '抓取课程结构' }}
-              </button>
-            </div>
-          </div>
-
           <p v-if="courseDetail" class="hint">{{ courseDetail.message }}</p>
           <p v-if="courseError" class="inline-error">{{ courseError }}</p>
 
@@ -675,7 +704,6 @@ onUnmounted(() => {
         </template>
 
         <template v-else-if="page === 'about'">
-          <p class="page-title-sm">关于</p>
           <dl class="facts">
             <div><dt>版本</dt><dd>{{ mode.version }}（{{ mode.mode }}）</dd></div>
             <div><dt>登录态</dt><dd>与 hsc 命令行共用，保存在 state 目录</dd></div>
@@ -690,14 +718,6 @@ onUnmounted(() => {
         </template>
 
         <template v-else-if="page === 'debug' && mode.debug">
-          <div class="page-head">
-            <p class="page-title-sm">调试</p>
-            <div class="actions">
-              <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
-              <button @click="clearDebug">清空日志</button>
-            </div>
-          </div>
-
           <div v-if="debugInfo" class="debug-grid">
             <div><span>模式</span><b>{{ debugInfo.mode }}</b></div>
             <div><span>state 目录</span><b class="mono">{{ debugInfo.stateDir }}</b></div>
@@ -1012,7 +1032,7 @@ onUnmounted(() => {
   word-break: break-all;
 }
 
-/* 子页面 */
+/* 子页面：标题在面板外，面板只放内容 */
 .subpage {
   flex: 1 0 auto;
   width: 100%;
@@ -1022,36 +1042,34 @@ onUnmounted(() => {
   box-sizing: border-box;
 }
 
+.page-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 0 0 20px;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+.page-sub {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
 .panel {
   background: var(--surface);
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-lg);
   padding: 24px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-}
-
-.page-title-sm {
-  margin: 0 0 6px;
-  font-size: 28px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-
-.page-sub {
-  margin: 0 0 18px;
-  color: var(--muted);
-}
-
-.page-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.page-head .page-title-sm {
-  margin: 0;
 }
 
 .tabs {
@@ -1500,6 +1518,10 @@ button.primary:disabled {
 
   .subpage {
     padding: 20px 16px 32px;
+  }
+
+  .page-title {
+    font-size: 28px;
   }
 }
 
