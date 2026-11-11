@@ -7,8 +7,9 @@
 ## 通用约定
 
 - 每个方法都返回 Promise；出错走 Promise reject，错误文本是可以直接展示的中文提示
-- state 目录与 hsc CLI 相同：开发模式下是项目根目录，打包后是 exe 所在目录；
-  见上游 `go/config.go` 的 `stateLayout`，路径一律走 `statePath(name)`
+- state 目录与 hsc CLI 相同：开发模式（`wails dev`）下是项目根目录，打包后是 exe 所在目录；
+  打包后的 exe 从任意工作目录启动都会切到 exe 目录，见 `internal/hsc/gui.go` 的
+  `resolveStateRoot`；见上游 `go/config.go` 的 `stateLayout`，路径一律走 `statePath(name)`
 - 文案朴素：中文、无 emoji、无符号；报错给出下一步动作
 - 构建模式：默认 release；`-tags debug` 构建 debug。前端先调 `AppMode`，debug 构建才显示调试面板与调试信息
 
@@ -68,8 +69,8 @@
 | --- | --- | --- |
 | loggedIn | boolean | `state/auth/cookies.json` 里是否有 cookie |
 | cookieCount | number | cookie 条数 |
-| account | string | 已保存凭据里的账号（打码） |
-| accountTail | string | 账号最后 3 位，顶栏只显示这个尾号 |
+| account | string | 账号（打码）：优先取已保存凭据；扫码登录从 cookie 的 `uname` 取 |
+| accountTail | string | 账号最后 3 位，顶栏只显示这个尾号；账号未知时为空，顶栏显示“已登录” |
 | credSaved | boolean | 是否有可用凭据 |
 | credEncrypted | boolean | 凭据是否为加密格式 |
 | hasTarget | boolean | 是否已有 `state/course/target.json` 课程配置 |

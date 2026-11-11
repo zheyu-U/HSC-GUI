@@ -4,6 +4,7 @@ package hsc
 // 到前端结构的映射，以及播放通过后写回缓存的行为。
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -120,5 +121,112 @@ func TestIsDocTaskRow(t *testing.T) {
 		if got := isDocTaskRow(c.row); got != c.want {
 			t.Errorf("%s: got %v want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestResolveStateRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "proj")
+	bin := filepath.Join(root, "build", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "wails.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(bin, "hsc-gui.exe")
+
+	if got := resolveStateRoot(false, root, exe); got != bin {
+		t.Fatalf("打包模式应使用 exe 目录，got %q", got)
+	}
+	if got := resolveStateRoot(true, root, exe); got != root {
+		t.Fatalf("开发模式应使用项目根目录，got %q", got)
+	}
+	if got := resolveStateRoot(true, bin, exe); got != root {
+		t.Fatalf("开发模式应从子目录向上找到项目根，got %q", got)
+	}
+	empty := t.TempDir()
+	if got := resolveStateRoot(true, empty, exe); got != empty {
+		t.Fatalf("开发模式找不到 wails.json 时应留在当前目录，got %q", got)
+	}
+}
+
+func TestAccountFromCookies(t *testing.T) {
+	jar := NewJar()
+	jar.Restore(map[string]map[string]string{
+		"hust.edu.cn": {"uname": "U202315009"},
+	})
+	account, tail := accountFromCookies(jar)
+	if account != "U202***" {
+		t.Fatalf("账号应按 maskUser 打码，got %q", account)
+	}
+	if tail != "009" {
+		t.Fatalf("账号尾号应为 009，got %q", tail)
+	}
+
+	if account, tail := accountFromCookies(NewJar()); account != "" || tail != "" {
+		t.Fatalf("没有 uname 时应返回空，got %q %q", account, tail)
+	}
+
+	chinese := NewJar()
+	chinese.Restore(map[string]map[string]string{
+		"hust.edu.cn": {"uname": "张三"},
+	})
+	if account, tail := accountFromCookies(chinese); account != "" || tail != "" {
+		t.Fatalf("中文姓名不应当账号，got %q %q", account, tail)
+	}
+}
+
+// TestStateDirFollowsExe 模拟从项目根目录启动打包后的 exe：
+// state 应该落到 exe 目录，登录 cookie 能正常读出来。
+func TestStateDirFollowsExe(t *testing.T) {
+	proj := t.TempDir()
+	bin := filepath.Join(proj, "build", "bin")
+	if err := os.MkdirAll(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, "wails.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	exe := filepath.Join(bin, "hsc-gui.exe")
+	root := resolveStateRoot(false, proj, exe)
+	if root != bin {
+		t.Fatalf("打包模式应从项目根目录落到 exe 目录，got %q", root)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldRoot, oldState := rootDir, stateDir
+	t.Cleanup(func() {
+		_ = os.Chdir(oldWd)
+		rootDir, stateDir = oldRoot, oldState
+	})
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	rootDir, stateDir = "", ""
+	if err := initPaths(); err != nil {
+		t.Fatal(err)
+	}
+
+	jar := NewJar()
+	jar.Restore(map[string]map[string]string{
+		"hust.edu.cn": {"uname": "U202315139"},
+	})
+	if err := jar.Save(); err != nil {
+		t.Fatal(err)
+	}
+	loaded := NewJar()
+	if err := loaded.Load(); err != nil {
+		t.Fatalf("exe 目录下的 cookies 应能加载: %v", err)
+	}
+	if loaded.Count() != 1 {
+		t.Fatalf("cookie 数量不对: %d", loaded.Count())
+	}
+	_, tail := accountFromCookies(loaded)
+	if tail != "139" {
+		t.Fatalf("账号尾号应为 139，got %q", tail)
 	}
 }

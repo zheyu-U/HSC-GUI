@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,20 +25,52 @@ var initOnce sync.Once
 var initErr error
 
 // InitState 初始化 state 目录。
-// GUI 必须与 CLI 读写同一份 state：打包后的 exe 从快捷方式启动时工作目录
-// 不一定是 exe 所在目录，没有项目标记（wails.json）时就切到 exe 目录。
+// GUI 必须与 CLI 读写同一份 state：打包后的 exe 一律切到 exe 所在目录，
+// 从快捷方式、终端或项目目录启动都落到同一份 state；只有 wails dev（dev 构建标签）
+// 留在项目根目录，方便本地调试。
 func InitState() error {
 	initOnce.Do(func() {
-		if cwd, err := os.Getwd(); err == nil {
-			if _, err := os.Stat(filepath.Join(cwd, "wails.json")); err != nil {
-				if exe, e := os.Executable(); e == nil {
-					_ = os.Chdir(filepath.Dir(exe))
-				}
-			}
+		cwd, _ := os.Getwd()
+		exePath, _ := os.Executable()
+		if root := resolveStateRoot(devMode, cwd, exePath); root != "" {
+			_ = os.Chdir(root)
 		}
 		initErr = initPaths()
 	})
 	return initErr
+}
+
+// resolveStateRoot 决定 state 目录放在哪个目录：
+// 开发模式用带 wails.json 的项目根目录，打包后一律用 exe 所在目录。
+// 这样 exe 从任意工作目录启动都不会读到另一份 state。
+func resolveStateRoot(dev bool, cwd, exePath string) string {
+	if !dev {
+		if exePath != "" {
+			return filepath.Dir(exePath)
+		}
+		return cwd
+	}
+	if root, ok := findProjectRoot(cwd); ok {
+		return root
+	}
+	return cwd
+}
+
+// findProjectRoot 从 dir 起向上找带 wails.json 的目录（开发模式用）。
+func findProjectRoot(dir string) (string, bool) {
+	if dir == "" {
+		return "", false
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "wails.json")); err == nil {
+			return dir, true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", false
+		}
+		dir = parent
+	}
 }
 
 // StateDir 返回当前 state 目录，界面用来告诉用户登录态存在哪里。
@@ -333,6 +366,36 @@ func tailRunes(s string, n int) string {
 	return string(r[len(r)-n:])
 }
 
+// accountFromCookies 从登录 cookie 里取账号：扫码登录不保存凭据，
+// 但 hust.edu.cn 的 uname 里有账号，用它补上顶栏尾号和菜单里的账号。
+func accountFromCookies(j *Jar) (string, string) {
+	u := url.URL{Scheme: "https", Host: "hust.edu.cn", Path: "/"}
+	for _, c := range j.Cookies(&u) {
+		if c.Name != "uname" || !looksLikeAccount(c.Value) {
+			continue
+		}
+		return maskUser(c.Value), tailRunes(c.Value, 3)
+	}
+	return "", ""
+}
+
+// looksLikeAccount 只接受 ASCII 账号（字母、数字、点、下划线、@、-）。
+// 有些账号的 uname 是中文姓名或其他展示值，不能当账号显示尾号。
+func looksLikeAccount(s string) bool {
+	if len(s) < 4 || len(s) > 32 {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '.', r == '_', r == '@', r == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // SessionStatus 读取本地登录态与凭据状态。
 func SessionStatus() (SessionInfo, error) {
 	if err := InitState(); err != nil {
@@ -355,6 +418,13 @@ func SessionStatus() (SessionInfo, error) {
 		if c, err := loadPlainCreds(); err == nil {
 			info.Account = maskUser(c.Username)
 			info.AccountTail = tailRunes(c.Username, 3)
+		}
+	}
+	// 扫码登录没有凭据文件，从登录 cookie 里补账号；密码登录已有凭据时不覆盖。
+	if info.AccountTail == "" {
+		if account, tail := accountFromCookies(jar); tail != "" {
+			info.Account = account
+			info.AccountTail = tail
 		}
 	}
 	if _, ok := loadTargetIfExists(); ok {

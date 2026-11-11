@@ -89,6 +89,12 @@ const debugBusy = ref(false)
 const loggedIn = computed(() => !!(session.value && session.value.loggedIn))
 const account = computed(() => (session.value && session.value.account) || '')
 const accountTail = computed(() => (session.value && session.value.accountTail) || '')
+const accountLabel = computed(() => {
+  if (accountTail.value) {
+    return '尾号 ' + accountTail.value
+  }
+  return loggedIn.value ? '已登录' : '登录'
+})
 const hasCourse = computed(() => !!(courseDetail.value && courseDetail.value.hasCourse))
 const prettySession = computed(() => (session.value ? JSON.stringify(session.value, null, 2) : ''))
 const lastDebugMessage = computed(() => {
@@ -684,9 +690,9 @@ onUnmounted(() => {
       <div class="bar-right">
         <template v-if="loggedIn">
           <div class="user-menu" @click.stop>
-            <button class="account-btn" @click="toggleMenu">尾号 {{ accountTail || '—' }}</button>
+            <button class="account-btn" @click="toggleMenu">{{ accountLabel }}</button>
             <div v-if="menuOpen" class="menu" role="menu">
-              <div class="menu-row"><span>账号</span><span class="v">{{ account || '未保存' }}</span></div>
+              <div class="menu-row"><span>账号</span><span class="v">{{ account || (loggedIn ? '已登录，未保存账号' : '未保存') }}</span></div>
               <div class="menu-row"><span>登录状态</span><span class="v">{{ loggedIn ? '有效' : '无' }}</span></div>
               <div class="menu-row"><span>记住账号</span><span class="v">{{ session && session.credSaved ? '已保存' : '未保存' }}</span></div>
               <div class="menu-row"><span>课程</span><span class="v">{{ session && session.hasTarget ? '已配置' : '未配置' }}</span></div>
