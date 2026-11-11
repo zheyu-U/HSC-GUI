@@ -142,6 +142,9 @@
 | docs | CourseDoc[] | 文档任务：`chapterIndex` `chapterId` `title` `module` `isPassed`；未扫描时为空数组 |
 | message | string | 状态说明，可直接展示 |
 
+`CourseDetail` 里的 `chapters` / `videos` / `works` / `docs` 始终是数组（空列表也返回 `[]`，
+不会返回 `null`），前端可以直接取 `.length`；新增列表字段时不要在 Go 里返回 nil slice。
+
 ### ScanCourse() -> CourseDetail
 
 逐章扫描附件（对应上游 `hsc scan`），结果写入 `state/course/scan.json`，返回刷新后的课程详情。

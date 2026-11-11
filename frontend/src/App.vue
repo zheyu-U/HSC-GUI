@@ -135,15 +135,10 @@ const unpassedVideos = computed(() => {
   const list = (courseDetail.value && courseDetail.value.videos) || []
   return list.filter((v) => !v.isPassed)
 })
+const docs = computed(() => (courseDetail.value && courseDetail.value.docs) || [])
 const docScanned = computed(() => !!(courseDetail.value && courseDetail.value.docScanned))
-const docUnpassed = computed(() => {
-  const list = (courseDetail.value && courseDetail.value.docs) || []
-  return list.filter((d) => !d.isPassed).length
-})
-const docPassed = computed(() => {
-  const list = (courseDetail.value && courseDetail.value.docs) || []
-  return list.filter((d) => d.isPassed).length
-})
+const docUnpassed = computed(() => docs.value.filter((d) => !d.isPassed).length)
+const docPassed = computed(() => docs.value.filter((d) => d.isPassed).length)
 const pageTitle = computed(() => {
   if (page.value === 'login') {
     if (view.value === 'success') {
@@ -913,7 +908,7 @@ onUnmounted(() => {
             <details class="doc-section" open>
               <summary>
                 <span class="chapter-name">文档任务</span>
-                <span class="hint" v-if="docScanned">已完成 {{ docPassed }}/{{ courseDetail.docs.length }}</span>
+                <span class="hint" v-if="docScanned">已完成 {{ docPassed }}/{{ docs.length }}</span>
                 <span class="hint" v-else>未扫描</span>
               </summary>
               <div class="doc-actions actions">
@@ -925,9 +920,9 @@ onUnmounted(() => {
                 </button>
                 <span class="hint" v-if="!docScanned">扫描会逐章读取附件，可能需要十几秒</span>
               </div>
-              <p v-if="docScanned && !courseDetail.docs.length" class="hint">这门课没有文档任务点。</p>
-              <ul v-if="courseDetail.docs.length" class="task-list doc-list">
-                <li v-for="(d, index) in courseDetail.docs" :key="'d' + d.chapterId + index">
+              <p v-if="docScanned && !docs.length" class="hint">这门课没有文档任务点。</p>
+              <ul v-if="docs.length" class="task-list doc-list">
+                <li v-for="(d, index) in docs" :key="'d' + d.chapterId + index">
                   <span class="task-tag">文档</span>
                   <span class="task-title">{{ d.title || '未命名文档' }}</span>
                   <span v-if="d.chapterIndex" class="hint">第 {{ d.chapterIndex }} 章</span>

@@ -4,8 +4,10 @@ package hsc
 // 到前端结构的映射，以及播放通过后写回缓存的行为。
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -83,6 +85,39 @@ func TestBuildCourseDetailWithDocs(t *testing.T) {
 	}
 	if detail.DocScanned || len(detail.Docs) != 0 {
 		t.Fatalf("另一门课的 scan.json 不应被采用: scanned=%v docs=%d", detail.DocScanned, len(detail.Docs))
+	}
+}
+
+func TestCourseDetailSlicesNotNull(t *testing.T) {
+	useTempState(t)
+
+	target := Target{Name: "数据结构", CourseID: "c1", ClazzID: "k1"}
+	writeTestJSON(t, "target.json", target)
+	writeTestJSON(t, "course.json", CourseSnapshot{
+		Target:   target,
+		Chapters: []Chapter{{KnowledgeID: "ch1"}},
+		Videos:   []VideoPoint{{ChapterID: "ch1", ObjectID: "v1", AttDuration: 600}},
+	})
+
+	detail, err := buildCourseDetail()
+	if err != nil {
+		t.Fatalf("buildCourseDetail: %v", err)
+	}
+	if detail.Docs == nil {
+		t.Fatal("没有 scan.json 时 Docs 应该是空切片，不能是 null")
+	}
+	if detail.Videos == nil || detail.Works == nil || detail.Chapters == nil {
+		t.Fatal("列表字段都应该是空切片，不能是 null")
+	}
+
+	b, err := json.Marshal(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"docs":[]`, `"works":[]`} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("JSON 应包含 %s，实际: %s", want, string(b))
+		}
 	}
 }
 

@@ -654,8 +654,14 @@ func GetCourseDetail() (CourseDetail, error) {
 }
 
 // buildCourseDetail 把 target + course.json 转成前端使用的视图。
+// 列表字段初始化成空切片，保证 JSON 里是 [] 而不是 null。
 func buildCourseDetail() (CourseDetail, error) {
-	var out CourseDetail
+	out := CourseDetail{
+		Chapters: []CourseChapter{},
+		Videos:   []CourseVideo{},
+		Works:    []CourseWork{},
+		Docs:     []CourseDoc{},
+	}
 	t, err := loadTarget()
 	if err != nil {
 		out.Message = "还没有选择课程。先获取课程列表，选一门课，再抓取课程结构。"
