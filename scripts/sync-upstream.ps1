@@ -41,7 +41,7 @@ $whitelist = @(
     "creds.go", "cred_cmd.go", "cas.go", "rsa512.go", "captcha.go",
     "login_cmd.go", "logout.go",
     "courses.go", "course.go", "init_cmd.go", "args.go", "parallel.go",
-    "scan_doc.go", "video.go", "video_refresh.go"
+    "scan_doc.go", "video.go", "video_refresh.go", "quiz.go"
 )
 $dataFiles = @("captcha-model.json")
 

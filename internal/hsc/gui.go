@@ -1172,3 +1172,187 @@ func CompleteDocs() (CourseDetail, error) {
 	}
 	return buildCourseDetail()
 }
+
+// ---- 作业与测验（只读浏览，不做自动答题） ----
+
+// QuizListItem 作业/测验列表项。题目来自上游 quiz dump 的缓存。
+type QuizListItem struct {
+	WorkID        string `json:"workId"`
+	Title         string `json:"title"`
+	ChapterIndex  int    `json:"chapterIndex"`
+	ChapterID     string `json:"chapterId"`
+	QuestionCount int    `json:"questionCount"`
+	Fetched       bool   `json:"fetched"`
+}
+
+// QuizOverview 作业/测验列表与抓题情况。
+type QuizOverview struct {
+	Scanned       bool           `json:"scanned"`
+	FetchedCount  int            `json:"fetchedCount"`
+	QuestionCount int            `json:"questionCount"`
+	Items         []QuizListItem `json:"items"`
+	Message       string         `json:"message"`
+}
+
+// QuizOption 题目选项。
+type QuizOption struct {
+	Value string `json:"value"`
+	Text  string `json:"text"`
+}
+
+// QuizQuestion 题目视图，不含答案与隐藏字段。
+type QuizQuestion struct {
+	QID        string       `json:"qid"`
+	TypeLabel  string       `json:"typeLabel"`
+	Stem       string       `json:"stem"`
+	Score      string       `json:"score"`
+	Options    []QuizOption `json:"options"`
+	BlankCount int          `json:"blankCount"`
+}
+
+// QuizDetailView 一份作业/测验的题目。
+type QuizDetailView struct {
+	WorkID    string         `json:"workId"`
+	Title     string         `json:"title"`
+	Questions []QuizQuestion `json:"questions"`
+}
+
+// loadQuizCache 读取上游 quiz dump 写下的 state/quiz/quizzes.json，按 workId 建索引。
+func loadQuizCache() map[string]Quiz {
+	cache := map[string]Quiz{}
+	var quizzes []Quiz
+	if err := readJSON(statePath("quizzes.json"), &quizzes); err != nil {
+		return cache
+	}
+	for _, q := range quizzes {
+		if q.Work.WorkID == "" {
+			continue
+		}
+		cache[q.Work.WorkID] = q
+	}
+	return cache
+}
+
+// GetQuizOverview 读取课程附件扫描结果与抓题缓存，生成作业/测验列表。
+// 不发起网络请求；题目本身用 GetQuizQuestions 按需取。
+func GetQuizOverview() (QuizOverview, error) {
+	if err := InitState(); err != nil {
+		return QuizOverview{}, err
+	}
+	t, err := loadTarget()
+	if err != nil {
+		return QuizOverview{Items: []QuizListItem{}, Message: "还没有选择课程。先获取课程列表，选一门课。"}, nil
+	}
+	return buildQuizOverview(t)
+}
+
+// buildQuizOverview 是 GetQuizOverview 的本地部分，单独拆出来方便测试。
+func buildQuizOverview(t Target) (QuizOverview, error) {
+	out := QuizOverview{Items: []QuizListItem{}}
+	scan, err := loadScanFor(t)
+	if err != nil {
+		out.Message = "还没有扫描课程附件。点“扫描课程附件”后就能看到作业与测验列表。"
+		return out, nil
+	}
+	out.Scanned = true
+
+	// 章节序号以扫描结果的行顺序为准；course.json 可能是旧缓存（章节数不一定一致）。
+	chapterIndex := map[string]int{}
+	nextChapter := 1
+	for _, r := range scan.Rows {
+		if r.Chapter == "" {
+			continue
+		}
+		if _, ok := chapterIndex[r.Chapter]; !ok {
+			chapterIndex[r.Chapter] = nextChapter
+			nextChapter++
+		}
+	}
+
+	cache := loadQuizCache()
+	seen := map[string]bool{}
+	for _, r := range scan.Rows {
+		if r.WorkID == "" || seen[r.WorkID] {
+			continue
+		}
+		seen[r.WorkID] = true
+		item := QuizListItem{
+			WorkID:       r.WorkID,
+			Title:        firstNonEmpty(r.Title, "未命名作业或测验"),
+			ChapterID:    r.Chapter,
+			ChapterIndex: chapterIndex[r.Chapter],
+		}
+		if q, ok := cache[r.WorkID]; ok {
+			item.Fetched = true
+			item.QuestionCount = len(q.Questions)
+			out.FetchedCount++
+			out.QuestionCount += len(q.Questions)
+		}
+		out.Items = append(out.Items, item)
+	}
+
+	switch {
+	case len(out.Items) == 0:
+		out.Message = "这门课没有作业或测验任务点。"
+	case out.FetchedCount == 0:
+		out.Message = fmt.Sprintf("共 %d 份作业与测验，还没有抓取题目。点“抓取题目”拉取未提交的题目。", len(out.Items))
+	default:
+		out.Message = fmt.Sprintf("共 %d 份，已抓取 %d 份题目，共 %d 题。", len(out.Items), out.FetchedCount, out.QuestionCount)
+	}
+	return out, nil
+}
+
+// DumpQuizzes 抓取未提交的作业/测验题目（上游 quiz dump），写入 state/quiz/quizzes.json。
+// 已提交或平台返回错误页的会被上游跳过，这里不做额外处理。
+func DumpQuizzes() (QuizOverview, error) {
+	if err := InitState(); err != nil {
+		return QuizOverview{}, err
+	}
+	t, err := loadTarget()
+	if err != nil {
+		return QuizOverview{}, fmt.Errorf("还没有选择课程，先在课程列表里选一门")
+	}
+	if _, err := loadScanFor(t); err != nil {
+		return QuizOverview{}, fmt.Errorf("还没有扫描课程附件，先点“扫描课程附件”")
+	}
+	if err := cmdQuizDump(); err != nil {
+		return QuizOverview{}, fmt.Errorf("抓取题目失败: %w", err)
+	}
+	return GetQuizOverview()
+}
+
+// GetQuizQuestions 读取某份作业/测验的题目；没有抓过题时给出下一步动作。
+func GetQuizQuestions(workID string) (QuizDetailView, error) {
+	if err := InitState(); err != nil {
+		return QuizDetailView{}, err
+	}
+	return buildQuizQuestions(workID)
+}
+
+// buildQuizQuestions 是 GetQuizQuestions 的本地部分，单独拆出来方便测试。
+func buildQuizQuestions(workID string) (QuizDetailView, error) {
+	cache, ok := loadQuizCache()[workID]
+	if !ok {
+		return QuizDetailView{}, fmt.Errorf("这份作业或测验还没有抓取题目，先点“抓取题目”")
+	}
+	out := QuizDetailView{
+		WorkID:    workID,
+		Title:     cache.Title,
+		Questions: make([]QuizQuestion, 0, len(cache.Questions)),
+	}
+	for _, q := range cache.Questions {
+		options := make([]QuizOption, 0, len(q.Options))
+		for _, o := range q.Options {
+			options = append(options, QuizOption{Value: o.Value, Text: o.Text})
+		}
+		out.Questions = append(out.Questions, QuizQuestion{
+			QID:        q.QID,
+			TypeLabel:  q.TypeLabel,
+			Stem:       q.Stem,
+			Score:      q.Score,
+			Options:    options,
+			BlankCount: q.BlankCount,
+		})
+	}
+	return out, nil
+}

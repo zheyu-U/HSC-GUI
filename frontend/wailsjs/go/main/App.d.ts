@@ -19,7 +19,13 @@ export function DebugInfo():Promise<main.DebugInfo>;
 
 export function DebugLog():Promise<Array<main.DebugEntry>>;
 
+export function DumpQuizzes():Promise<hsc.QuizOverview>;
+
 export function GetCourseDetail():Promise<hsc.CourseDetail>;
+
+export function GetQuizOverview():Promise<hsc.QuizOverview>;
+
+export function GetQuizQuestions(arg1:string):Promise<hsc.QuizDetailView>;
 
 export function ListCourses(arg1:boolean):Promise<Array<hsc.CourseItem>>;
 

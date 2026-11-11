@@ -34,8 +34,20 @@ export function DebugLog() {
   return window['go']['main']['App']['DebugLog']();
 }
 
+export function DumpQuizzes() {
+  return window['go']['main']['App']['DumpQuizzes']();
+}
+
 export function GetCourseDetail() {
   return window['go']['main']['App']['GetCourseDetail']();
+}
+
+export function GetQuizOverview() {
+  return window['go']['main']['App']['GetQuizOverview']();
+}
+
+export function GetQuizQuestions(arg1) {
+  return window['go']['main']['App']['GetQuizQuestions'](arg1);
 }
 
 export function ListCourses(arg1) {

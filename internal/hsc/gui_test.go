@@ -265,3 +265,74 @@ func TestStateDirFollowsExe(t *testing.T) {
 		t.Fatalf("账号尾号应为 139，got %q", tail)
 	}
 }
+
+func TestBuildQuizOverview(t *testing.T) {
+	useTempState(t)
+	target := Target{Name: "数据结构", CourseID: "c1", ClazzID: "k1"}
+	writeTestJSON(t, "scan.json", ScanResult{
+		CourseID: "c1",
+		Rows: []ScanRow{
+			{Chapter: "ch1", Module: "insertvideo", Type: "video", Title: "视频附件"},
+			{Chapter: "ch1", WorkID: "w1", Title: "第一章检测题"},
+			{Chapter: "ch1", WorkID: "w1", Title: "第一章检测题"},
+			{Chapter: "ch2", WorkID: "w2", Title: "第二章练习题"},
+		},
+	})
+	writeTestJSON(t, "quizzes.json", []Quiz{{
+		Index: 0,
+		Title: "第一章检测题",
+		Work:  WorkPoint{WorkID: "w1", ChapterID: "ch1"},
+		Questions: []Question{{
+			QID:       "q1",
+			TypeLabel: "单选题",
+			Stem:      "题干",
+			Score:     "2",
+			Options:   []Option{{Value: "A", Text: "甲"}, {Value: "B", Text: "乙"}},
+		}},
+	}})
+
+	ov, err := buildQuizOverview(target)
+	if err != nil {
+		t.Fatalf("buildQuizOverview: %v", err)
+	}
+	if !ov.Scanned {
+		t.Fatal("有 scan.json 时应标记为已扫描")
+	}
+	if len(ov.Items) != 2 {
+		t.Fatalf("作业列表应按 workId 去重后为 2，实际 %d", len(ov.Items))
+	}
+	if ov.Items[0].WorkID != "w1" || ov.Items[0].ChapterIndex != 1 {
+		t.Fatalf("第一项不对: %+v", ov.Items[0])
+	}
+	if !ov.Items[0].Fetched || ov.Items[0].QuestionCount != 1 {
+		t.Fatalf("第一项应已抓题且 1 题: %+v", ov.Items[0])
+	}
+	if ov.Items[1].Fetched || ov.Items[1].ChapterIndex != 2 {
+		t.Fatalf("第二项应未抓题、第 2 章: %+v", ov.Items[1])
+	}
+	if ov.FetchedCount != 1 || ov.QuestionCount != 1 {
+		t.Fatalf("统计不对: fetched=%d questions=%d", ov.FetchedCount, ov.QuestionCount)
+	}
+
+	detail, err := buildQuizQuestions("w1")
+	if err != nil {
+		t.Fatalf("buildQuizQuestions: %v", err)
+	}
+	if len(detail.Questions) != 1 || len(detail.Questions[0].Options) != 2 {
+		t.Fatalf("题目或选项数量不对: %+v", detail)
+	}
+	if _, err := buildQuizQuestions("missing"); err == nil {
+		t.Fatal("没有抓题的 workId 应返回错误")
+	}
+
+	if err := os.Remove(statePath("scan.json")); err != nil {
+		t.Fatal(err)
+	}
+	ov, err = buildQuizOverview(target)
+	if err != nil {
+		t.Fatalf("buildQuizOverview（未扫描）: %v", err)
+	}
+	if ov.Scanned || len(ov.Items) != 0 {
+		t.Fatalf("没有 scan.json 时应提示先扫描: %+v", ov)
+	}
+}

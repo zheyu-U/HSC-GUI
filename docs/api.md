@@ -179,6 +179,40 @@
 
 停止正在进行的播放：当前这一次上报完成后结束，事件会再推一条 `cancelled`。
 
+### GetQuizOverview() -> QuizOverview
+
+读取作业与测验列表和抓题情况，不发起网络请求。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| scanned | boolean | 是否已有 `state/course/scan.json`（课程附件扫描结果） |
+| fetchedCount | number | 已抓取题目的份数 |
+| questionCount | number | 已抓取题目总数 |
+| items | QuizListItem[] | `workId` `title` `chapterIndex` `chapterId` `questionCount` `fetched` |
+| message | string | 状态说明，可直接展示 |
+
+- 列表来自 `scan.json` 里有 `workId` 的附件，按 `workId` 去重；题目缓存来自
+  `state/quiz/quizzes.json`
+- `fetched=false` 表示抓题时被上游跳过（通常是已提交或平台返回错误页）
+
+### DumpQuizzes() -> QuizOverview
+
+抓取未提交的作业/测验题目（对应上游 `hsc quiz dump`），写入 `state/quiz/quizzes.json`，
+返回刷新后的列表。需要先扫描课程附件；已提交的会被上游跳过。
+
+### GetQuizQuestions(workID) -> QuizDetailView
+
+读取一份作业/测验的题目，只读，不返回答案与页面隐藏字段。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| workId | string | 作业/测验 ID |
+| title | string | 标题 |
+| questions | QuizQuestion[] | `qid` `typeLabel` `stem` `score` `options`（`value` `text`）`blankCount` |
+
+- 没有抓过题时 reject，提示先抓取题目
+- 不接自动答题与交卷；不会读写 `state/quiz/answers.json`
+
 ### AppMode() -> AppModeInfo
 
 返回构建模式与版本。前端在启动时调用一次，决定显示 release 还是 debug 界面。
@@ -278,4 +312,5 @@
 - 状态路径映射：上游 `go/config.go` 的 `stateLayout`
 - 播放上报、限速与签名：上游 `go/video.go`；开播前刷新参数：`go/video_refresh.go`
 - 文档任务扫描与完成：上游 `go/scan_doc.go`
+- 作业/测验抓题与解析：上游 `go/quiz.go`（`cmdQuizDump` / `parseQuiz`）
 - GUI 侧的编排代码：`internal/hsc/gui.go`（本仓库新增，不属于上游同步范围）

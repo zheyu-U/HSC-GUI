@@ -9,7 +9,10 @@ import {
   CompleteDocs,
   DebugInfo,
   DebugLog,
+  DumpQuizzes,
   GetCourseDetail,
+  GetQuizOverview,
+  GetQuizQuestions,
   ListCourses,
   LoginPassword,
   Logout,
@@ -29,6 +32,12 @@ const TITLES = [
   '先把任务点清一清',
   '该刷课了',
 ]
+
+const COURSE_PAGE_SIZE = 5
+const CHAPTER_PAGE_SIZE = 8
+const DOC_PAGE_SIZE = 10
+const QUIZ_PAGE_SIZE = 8
+const QUESTION_PAGE_SIZE = 5
 
 const page = ref('home')
 const title = ref(TITLES[0])
@@ -62,6 +71,18 @@ const courseDetail = ref(null)
 const courseLoading = ref(false)
 const courseBusy = ref(false)
 const courseError = ref('')
+
+const coursePage = ref(1)
+const chapterPage = ref(1)
+const docPage = ref(1)
+
+const quizOverview = ref(null)
+const quizBusy = ref(false)
+const quizError = ref('')
+const quizSelected = ref('')
+const quizQuestions = ref([])
+const quizListPage = ref(1)
+const quizQuestionPage = ref(1)
 
 const docBusy = ref(false)
 const playRunning = ref(false)
@@ -139,6 +160,39 @@ const docs = computed(() => (courseDetail.value && courseDetail.value.docs) || [
 const docScanned = computed(() => !!(courseDetail.value && courseDetail.value.docScanned))
 const docUnpassed = computed(() => docs.value.filter((d) => !d.isPassed).length)
 const docPassed = computed(() => docs.value.filter((d) => d.isPassed).length)
+
+// 分页：列表在模板里只渲染当前页，页数按实际长度算。
+function totalPages(total, size) {
+  return Math.max(1, Math.ceil(total / size))
+}
+function clampPage(page, total, size) {
+  return Math.min(Math.max(1, page), totalPages(total, size))
+}
+function pageItems(list, page, size) {
+  const current = clampPage(page, list.length, size)
+  return list.slice((current - 1) * size, current * size)
+}
+
+const chapters = computed(() => (courseDetail.value && courseDetail.value.chapters) || [])
+const courseTotalPages = computed(() => totalPages(courseList.value.length, COURSE_PAGE_SIZE))
+const courseCurrentPage = computed(() => clampPage(coursePage.value, courseList.value.length, COURSE_PAGE_SIZE))
+const pagedCourses = computed(() => pageItems(courseList.value, coursePage.value, COURSE_PAGE_SIZE))
+const chapterTotalPages = computed(() => totalPages(chapters.value.length, CHAPTER_PAGE_SIZE))
+const chapterCurrentPage = computed(() => clampPage(chapterPage.value, chapters.value.length, CHAPTER_PAGE_SIZE))
+const pagedChapters = computed(() => pageItems(chapters.value, chapterPage.value, CHAPTER_PAGE_SIZE))
+const docTotalPages = computed(() => totalPages(docs.value.length, DOC_PAGE_SIZE))
+const docCurrentPage = computed(() => clampPage(docPage.value, docs.value.length, DOC_PAGE_SIZE))
+const pagedDocs = computed(() => pageItems(docs.value, docPage.value, DOC_PAGE_SIZE))
+
+const quizItems = computed(() => (quizOverview.value && quizOverview.value.items) || [])
+const quizTotalPages = computed(() => totalPages(quizItems.value.length, QUIZ_PAGE_SIZE))
+const quizCurrentPage = computed(() => clampPage(quizListPage.value, quizItems.value.length, QUIZ_PAGE_SIZE))
+const pagedQuizItems = computed(() => pageItems(quizItems.value, quizListPage.value, QUIZ_PAGE_SIZE))
+const selectedQuizItem = computed(() => quizItems.value.find((q) => q.workId === quizSelected.value) || null)
+const quizQuestionTotalPages = computed(() => totalPages(quizQuestions.value.length, QUESTION_PAGE_SIZE))
+const quizQuestionCurrentPage = computed(() => clampPage(quizQuestionPage.value, quizQuestions.value.length, QUESTION_PAGE_SIZE))
+const pagedQuizQuestions = computed(() => pageItems(quizQuestions.value, quizQuestionPage.value, QUESTION_PAGE_SIZE))
+
 const pageTitle = computed(() => {
   if (page.value === 'login') {
     if (view.value === 'success') {
@@ -148,6 +202,9 @@ const pageTitle = computed(() => {
   }
   if (page.value === 'course') {
     return '课程'
+  }
+  if (page.value === 'quiz') {
+    return '作业与测验'
   }
   if (page.value === 'about') {
     return '关于'
@@ -163,6 +220,9 @@ const pageLead = computed(() => {
       return account.value ? '账号 ' + account.value : '登录态已保存到本机'
     }
     return '用企业微信扫码，或账号密码登录。'
+  }
+  if (page.value === 'quiz') {
+    return '只读浏览题目，不做自动作答。'
   }
   return ''
 })
@@ -228,6 +288,14 @@ function showPage(name) {
     }
     if (!courseList.value.length && !courseLoading.value) {
       loadCourses(true)
+    }
+    if (!quizOverview.value && !quizBusy.value) {
+      loadQuizOverview()
+    }
+  }
+  if (name === 'quiz') {
+    if (!quizOverview.value && !quizBusy.value) {
+      loadQuizOverview()
     }
   }
   if ((name === 'home' || name === 'debug') && mode.value.debug) {
@@ -471,6 +539,7 @@ async function loadCourses(refresh) {
   courseError.value = ''
   try {
     courseList.value = await ListCourses(refresh !== false)
+    coursePage.value = 1
   } catch (e) {
     courseError.value = friendly(e)
   } finally {
@@ -486,6 +555,11 @@ async function selectCourse(index) {
     const detail = await SelectCourse(index)
     courseDetail.value = detail
     playState.value = emptyPlayState()
+    chapterPage.value = 1
+    docPage.value = 1
+    quizOverview.value = null
+    quizSelected.value = ''
+    quizQuestions.value = []
     setNotice('已切换到课程 ' + (detail.target.name || detail.target.courseId), 'ok')
     await refreshSession()
   } catch (e) {
@@ -501,6 +575,9 @@ async function refreshCourse() {
   courseError.value = ''
   try {
     courseDetail.value = await RefreshCourse()
+    chapterPage.value = 1
+    docPage.value = 1
+    quizOverview.value = null
     setNotice('课程结构已更新', 'ok')
   } catch (e) {
     courseError.value = friendly(e)
@@ -601,6 +678,81 @@ async function completeDocs() {
     docBusy.value = false
     refreshDebug()
   }
+}
+
+async function loadQuizOverview() {
+  quizBusy.value = true
+  quizError.value = ''
+  try {
+    quizOverview.value = await GetQuizOverview()
+    quizListPage.value = 1
+    if (quizSelected.value && !quizItems.value.some((q) => q.workId === quizSelected.value)) {
+      quizSelected.value = ''
+      quizQuestions.value = []
+    }
+  } catch (e) {
+    quizError.value = friendly(e)
+  } finally {
+    quizBusy.value = false
+    refreshDebug()
+  }
+}
+
+async function scanForQuiz() {
+  quizBusy.value = true
+  quizError.value = ''
+  try {
+    courseDetail.value = await ScanCourse()
+    quizOverview.value = await GetQuizOverview()
+    quizListPage.value = 1
+    setNotice('课程附件扫描完成', 'ok')
+  } catch (e) {
+    quizError.value = friendly(e)
+  } finally {
+    quizBusy.value = false
+    refreshDebug()
+  }
+}
+
+async function dumpQuizzes() {
+  quizBusy.value = true
+  quizError.value = ''
+  try {
+    quizOverview.value = await DumpQuizzes()
+    quizListPage.value = 1
+    setNotice('题目抓取完成', 'ok')
+  } catch (e) {
+    quizError.value = friendly(e)
+  } finally {
+    quizBusy.value = false
+    refreshDebug()
+  }
+}
+
+async function openQuiz(item) {
+  if (!item || !item.fetched) {
+    return
+  }
+  quizSelected.value = item.workId
+  quizQuestionPage.value = 1
+  quizQuestions.value = []
+  quizError.value = ''
+  quizBusy.value = true
+  try {
+    const detail = await GetQuizQuestions(item.workId)
+    quizQuestions.value = detail.questions || []
+  } catch (e) {
+    quizError.value = friendly(e)
+  } finally {
+    quizBusy.value = false
+    refreshDebug()
+  }
+}
+
+function backToQuizList() {
+  quizSelected.value = ''
+  quizQuestions.value = []
+  quizError.value = ''
 }
 
 function formatDuration(seconds) {
@@ -747,6 +899,11 @@ onUnmounted(() => {
             {{ courseBusy ? '抓取中' : '抓取课程结构' }}
           </button>
         </div>
+        <div v-else-if="page === 'quiz'" class="actions">
+          <button @click="dumpQuizzes" :disabled="quizBusy || playRunning || !quizOverview || !quizOverview.scanned">抓取题目</button>
+          <button @click="loadQuizOverview" :disabled="quizBusy">刷新列表</button>
+          <button @click="showPage('course')">返回课程</button>
+        </div>
         <div v-else-if="page === 'debug' && mode.debug" class="actions">
           <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
           <button @click="clearDebug">清空日志</button>
@@ -828,13 +985,18 @@ onUnmounted(() => {
           <p v-if="courseError" class="inline-error">{{ courseError }}</p>
 
           <div v-if="courseList.length" class="course-list">
-            <div v-for="item in courseList" :key="item.courseId" class="course-row">
+            <div v-for="item in pagedCourses" :key="item.courseId" class="course-row">
               <span class="course-index">{{ item.index }}</span>
               <span class="course-name">{{ item.name || '未命名课程' }}</span>
               <span class="course-teacher">{{ item.teacher }}</span>
               <span v-if="isCurrent(item)" class="course-current">当前</span>
               <button @click="selectCourse(item.index)" :disabled="courseBusy || courseLoading || playRunning">选择</button>
             </div>
+          </div>
+          <div v-if="courseTotalPages > 1" class="pager actions">
+            <button :disabled="courseCurrentPage <= 1" @click="coursePage = courseCurrentPage - 1">上一页</button>
+            <span class="hint">第 {{ courseCurrentPage }} / {{ courseTotalPages }} 页，共 {{ courseList.length }} 门</span>
+            <button :disabled="courseCurrentPage >= courseTotalPages" @click="coursePage = courseCurrentPage + 1">下一页</button>
           </div>
 
           <template v-if="hasCourse">
@@ -879,7 +1041,7 @@ onUnmounted(() => {
             </div>
 
             <div class="chapter-list">
-              <details v-for="ch in courseDetail.chapters" :key="ch.id" class="chapter" :open="ch.index <= 2">
+              <details v-for="ch in pagedChapters" :key="ch.id" class="chapter" :open="ch.index <= 2">
                 <summary>
                   <span class="chapter-name">{{ ch.title || ('章节 ' + ch.index) }}</span>
                   <span class="hint">视频 {{ ch.videosPassed }}/{{ ch.videos }}，作业 {{ ch.works }}</span>
@@ -904,6 +1066,11 @@ onUnmounted(() => {
                 </ul>
               </details>
             </div>
+            <div v-if="chapterTotalPages > 1" class="pager actions">
+              <button :disabled="chapterCurrentPage <= 1" @click="chapterPage = chapterCurrentPage - 1">上一页</button>
+              <span class="hint">第 {{ chapterCurrentPage }} / {{ chapterTotalPages }} 页，共 {{ chapters.length }} 章</span>
+              <button :disabled="chapterCurrentPage >= chapterTotalPages" @click="chapterPage = chapterCurrentPage + 1">下一页</button>
+            </div>
 
             <details class="doc-section" open>
               <summary>
@@ -922,7 +1089,7 @@ onUnmounted(() => {
               </div>
               <p v-if="docScanned && !docs.length" class="hint">这门课没有文档任务点。</p>
               <ul v-if="docs.length" class="task-list doc-list">
-                <li v-for="(d, index) in docs" :key="'d' + d.chapterId + index">
+                <li v-for="(d, index) in pagedDocs" :key="'d' + d.chapterId + index">
                   <span class="task-tag">文档</span>
                   <span class="task-title">{{ d.title || '未命名文档' }}</span>
                   <span v-if="d.chapterIndex" class="hint">第 {{ d.chapterIndex }} 章</span>
@@ -930,7 +1097,86 @@ onUnmounted(() => {
                   <span v-else class="hint">未完成</span>
                 </li>
               </ul>
+              <div v-if="docTotalPages > 1" class="pager actions">
+                <button :disabled="docCurrentPage <= 1" @click="docPage = docCurrentPage - 1">上一页</button>
+                <span class="hint">第 {{ docCurrentPage }} / {{ docTotalPages }} 页，共 {{ docs.length }} 个</span>
+                <button :disabled="docCurrentPage >= docTotalPages" @click="docPage = docCurrentPage + 1">下一页</button>
+              </div>
             </details>
+
+            <div class="quiz-entry">
+              <div class="quiz-entry-text">
+                <span class="chapter-name">作业与测验</span>
+                <span class="hint">{{ quizOverview && quizOverview.scanned ? quizItems.length : courseDetail.summary.works }} 个任务点，可查看已抓取的题目</span>
+              </div>
+              <button @click="showPage('quiz')">查看</button>
+            </div>
+          </template>
+        </template>
+
+        <template v-else-if="page === 'quiz'">
+          <p v-if="quizError" class="inline-error">{{ quizError }}</p>
+          <p v-if="quizOverview" class="hint">{{ quizOverview.message }}</p>
+          <p v-else class="hint">正在读取作业与测验...</p>
+
+          <template v-if="quizOverview && quizOverview.scanned">
+            <template v-if="quizSelected">
+              <div class="quiz-detail-head actions">
+                <button @click="backToQuizList">返回列表</button>
+                <span class="chapter-name">{{ (selectedQuizItem && selectedQuizItem.title) || '作业/测验' }}</span>
+                <span v-if="quizQuestions.length" class="hint">共 {{ quizQuestions.length }} 题</span>
+              </div>
+              <p v-if="quizBusy && !quizQuestions.length" class="hint">正在读取题目...</p>
+              <p v-else-if="!quizQuestions.length" class="hint">这份作业或测验没有可显示的题目。</p>
+              <div class="quiz-questions">
+                <div v-for="(q, i) in pagedQuizQuestions" :key="q.qid + '-' + i" class="quiz-question">
+                  <div class="quiz-stem">
+                    <span class="task-tag">{{ q.typeLabel || '题目' }}</span>
+                    <span class="quiz-stem-text">{{ (quizQuestionCurrentPage - 1) * QUESTION_PAGE_SIZE + i + 1 }}. {{ q.stem }}</span>
+                    <span v-if="q.score" class="hint">{{ q.score }} 分</span>
+                  </div>
+                  <ul v-if="q.options && q.options.length" class="quiz-options">
+                    <li v-for="o in q.options" :key="o.value"><b>{{ o.value }}.</b> {{ o.text }}</li>
+                  </ul>
+                  <p v-else-if="q.blankCount" class="hint">填空题，共 {{ q.blankCount }} 空</p>
+                </div>
+              </div>
+              <div v-if="quizQuestionTotalPages > 1" class="pager actions">
+                <button :disabled="quizQuestionCurrentPage <= 1" @click="quizQuestionPage = quizQuestionCurrentPage - 1">上一页</button>
+                <span class="hint">第 {{ quizQuestionCurrentPage }} / {{ quizQuestionTotalPages }} 页</span>
+                <button :disabled="quizQuestionCurrentPage >= quizQuestionTotalPages" @click="quizQuestionPage = quizQuestionCurrentPage + 1">下一页</button>
+              </div>
+            </template>
+
+            <template v-else>
+              <p v-if="!quizItems.length" class="hint">这门课没有作业或测验任务点。</p>
+              <div v-else class="quiz-list">
+                <div v-for="item in pagedQuizItems" :key="item.workId" class="quiz-row">
+                  <span class="course-index">{{ item.chapterIndex || '' }}</span>
+                  <span class="quiz-title">{{ item.title }}</span>
+                  <span v-if="item.fetched" class="hint">{{ item.questionCount }} 题</span>
+                  <span v-else class="hint">未抓题</span>
+                  <button @click="openQuiz(item)" :disabled="quizBusy || !item.fetched">
+                    {{ item.fetched ? '查看题目' : '未抓取' }}
+                  </button>
+                </div>
+              </div>
+              <div v-if="quizTotalPages > 1" class="pager actions">
+                <button :disabled="quizCurrentPage <= 1" @click="quizListPage = quizCurrentPage - 1">上一页</button>
+                <span class="hint">第 {{ quizCurrentPage }} / {{ quizTotalPages }} 页，共 {{ quizItems.length }} 份</span>
+                <button :disabled="quizCurrentPage >= quizTotalPages" @click="quizListPage = quizCurrentPage + 1">下一页</button>
+              </div>
+              <p class="hint">抓取题目只拉取未提交的作业与测验；已提交的会显示“未抓取”。</p>
+            </template>
+          </template>
+
+          <template v-else-if="quizOverview">
+            <div class="actions">
+              <button class="primary" @click="scanForQuiz" :disabled="quizBusy">
+                {{ quizBusy ? '扫描中' : '扫描课程附件' }}
+              </button>
+            </div>
+            <p class="hint">扫描会逐章读取附件，可能需要十几秒；扫描后“抓取题目”才有内容。</p>
           </template>
         </template>
 
@@ -1746,7 +1992,160 @@ button.primary:disabled {
 }
 
 .doc-list {
-  max-height: 240px;
+  max-height: none;
+}
+
+/* 分页 */
+.pager {
+  margin: 10px 0 4px;
+}
+
+.pager .hint {
+  margin: 0;
+}
+
+/* 作业与测验入口 */
+.quiz-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  padding: 8px 12px;
+}
+
+.quiz-entry-text {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.quiz-entry button {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.quiz-entry button:hover {
+  background: var(--surface-2);
+}
+
+/* 作业与测验列表 */
+.quiz-list {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  margin: 10px 0;
+}
+
+.quiz-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #f5f6f7;
+  font-size: 13px;
+}
+
+.quiz-row:last-child {
+  border-bottom: none;
+}
+
+.quiz-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quiz-row button {
+  flex: none;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.quiz-row button:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.quiz-row button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+/* 题目 */
+.quiz-detail-head {
+  margin-bottom: 12px;
+}
+
+.quiz-detail-head .hint {
+  margin: 0;
+}
+
+.quiz-questions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.quiz-question {
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+}
+
+.quiz-stem {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.quiz-stem-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.quiz-stem .hint {
+  margin: 0;
+  flex: none;
+}
+
+.quiz-options {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.quiz-options li {
+  word-break: break-word;
+}
+
+.quiz-options b {
+  font-weight: 500;
+  color: var(--muted);
 }
 
 .inline-error {

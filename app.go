@@ -13,7 +13,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-const appVersion = "0.6.2"
+const appVersion = "0.7.0"
 
 // App 是暴露给前端的绑定对象，方法清单同步维护在 docs/api.md。
 type App struct {
@@ -312,4 +312,40 @@ func (a *App) StartPlay(objectID string, speed float64) (hsc.PlayStartResult, er
 func (a *App) CancelPlay() {
 	a.record("调用", "CancelPlay")
 	hsc.CancelPlay()
+}
+
+// GetQuizOverview 读取作业与测验列表和抓题情况，不发起网络请求。
+func (a *App) GetQuizOverview() (hsc.QuizOverview, error) {
+	a.record("调用", "GetQuizOverview")
+	out, err := hsc.GetQuizOverview()
+	if err != nil {
+		a.record("错误", "GetQuizOverview: "+err.Error())
+		return out, err
+	}
+	a.record("结果", fmt.Sprintf("作业与测验 %d 份，已抓题 %d 份", len(out.Items), out.FetchedCount))
+	return out, nil
+}
+
+// DumpQuizzes 抓取未提交的作业/测验题目（上游 quiz dump）。
+func (a *App) DumpQuizzes() (hsc.QuizOverview, error) {
+	a.record("调用", "DumpQuizzes")
+	out, err := hsc.DumpQuizzes()
+	if err != nil {
+		a.record("错误", "DumpQuizzes: "+err.Error())
+		return out, err
+	}
+	a.record("结果", fmt.Sprintf("抓题完成：%d 份，共 %d 题", out.FetchedCount, out.QuestionCount))
+	return out, nil
+}
+
+// GetQuizQuestions 读取某份作业/测验的题目（只读，不含答案）。
+func (a *App) GetQuizQuestions(workID string) (hsc.QuizDetailView, error) {
+	a.record("调用", "GetQuizQuestions "+workID)
+	out, err := hsc.GetQuizQuestions(workID)
+	if err != nil {
+		a.record("错误", "GetQuizQuestions: "+err.Error())
+		return out, err
+	}
+	a.record("结果", fmt.Sprintf("%s：%d 题", out.Title, len(out.Questions)))
+	return out, nil
 }

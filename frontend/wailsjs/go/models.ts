@@ -312,6 +312,156 @@ export namespace hsc {
 	        this.expiresAt = source["expiresAt"];
 	    }
 	}
+	export class QuizOption {
+	    value: string;
+	    text: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new QuizOption(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.value = source["value"];
+	        this.text = source["text"];
+	    }
+	}
+	export class QuizQuestion {
+	    qid: string;
+	    typeLabel: string;
+	    stem: string;
+	    score: string;
+	    options: QuizOption[];
+	    blankCount: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new QuizQuestion(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.qid = source["qid"];
+	        this.typeLabel = source["typeLabel"];
+	        this.stem = source["stem"];
+	        this.score = source["score"];
+	        this.options = this.convertValues(source["options"], QuizOption);
+	        this.blankCount = source["blankCount"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class QuizDetailView {
+	    workId: string;
+	    title: string;
+	    questions: QuizQuestion[];
+	
+	    static createFrom(source: any = {}) {
+	        return new QuizDetailView(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.workId = source["workId"];
+	        this.title = source["title"];
+	        this.questions = this.convertValues(source["questions"], QuizQuestion);
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class QuizListItem {
+	    workId: string;
+	    title: string;
+	    chapterIndex: number;
+	    chapterId: string;
+	    questionCount: number;
+	    fetched: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new QuizListItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.workId = source["workId"];
+	        this.title = source["title"];
+	        this.chapterIndex = source["chapterIndex"];
+	        this.chapterId = source["chapterId"];
+	        this.questionCount = source["questionCount"];
+	        this.fetched = source["fetched"];
+	    }
+	}
+	
+	export class QuizOverview {
+	    scanned: boolean;
+	    fetchedCount: number;
+	    questionCount: number;
+	    items: QuizListItem[];
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new QuizOverview(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.scanned = source["scanned"];
+	        this.fetchedCount = source["fetchedCount"];
+	        this.questionCount = source["questionCount"];
+	        this.items = this.convertValues(source["items"], QuizListItem);
+	        this.message = source["message"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
 	export class SessionInfo {
 	    loggedIn: boolean;
 	    cookieCount: number;

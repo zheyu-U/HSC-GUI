@@ -1,0 +1,529 @@
+package hsc
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"os"
+	"regexp"
+	"sort"
+	"strings"
+)
+
+// ---------------- 题目结构 ----------------
+
+type Option struct {
+	Value string `json:"value"`
+	Text  string `json:"text"`
+}
+
+type Question struct {
+	QID        string   `json:"qid"`
+	QType      int      `json:"qtype"`
+	TypeLabel  string   `json:"typeLabel"`
+	Stem       string   `json:"stem"`
+	Score      string   `json:"score"`
+	Options    []Option `json:"options"`
+	BlankCount int      `json:"blankCount"`
+}
+
+type Quiz struct {
+	Index     int               `json:"index"`
+	Title     string            `json:"title"`
+	Work      WorkPoint         `json:"work"`
+	Action    string            `json:"action"`
+	PageURL   string            `json:"pageUrl"`
+	Hidden    map[string]string `json:"hidden"`
+	Questions []Question        `json:"questions"`
+}
+
+// ---------------- HTML 工具 ----------------
+
+var (
+	reTag       = regexp.MustCompile(`<[^>]+>`)
+	reSpace     = regexp.MustCompile(`\s+`)
+	reQBlocks   = regexp.MustCompile(`<div[^>]*class="singleQuesId"[^>]*id="question(\d+)"`)
+	reTiMu      = regexp.MustCompile(`<div[^>]*class="[^"]*TiMu[^"]*"`)
+	reTitle     = regexp.MustCompile(`(?s)<div[^>]*class="newZy_TItle"[^>]*>(.*?)</div>`)
+	reTypeTag   = regexp.MustCompile(`【([^】]+)】`)
+	reScore     = regexp.MustCompile(`（\s*([\d.]+)\s*分\s*）`)
+	reOption    = regexp.MustCompile(`(?s)<span[^>]*name="answer(check)?(\d+)"[^>]*data="([^"]*)"[^>]*>.*?</span>.*?<a[^>]*>(.*?)</a>`)
+	reQID1      = regexp.MustCompile(`<li[^>]*qid="(\d+)"`)
+	reQID2      = regexp.MustCompile(`name="answer(\d+)"`)
+	reQID3      = regexp.MustCompile(`id="answer(\d+)"`)
+	reQType     = regexp.MustCompile(`qtype="(\d+)"`)
+	reBlank     = regexp.MustCompile(`<input[^>]*name="answer(\d+)"[^>]*>`)
+	reHidden    = regexp.MustCompile(`(?s)<input[^>]*type="hidden"[^>]*>`)
+	reName      = regexp.MustCompile(`name="([^"]+)"`)
+	reValue     = regexp.MustCompile(`value="([^"]*)"`)
+	reAction    = regexp.MustCompile(`(?s)<form[^>]*(?:id|name)="form1"[^>]*>`)
+	reActVal    = regexp.MustCompile(`action="([^"]+)"`)
+	reUTEnc     = regexp.MustCompile(`utEnc\s*=\s*"([0-9a-f]{32})"`)
+	reTitlePage = regexp.MustCompile(`<title>([^<]*)</title>`)
+)
+
+func stripTags(s string) string {
+	s = reTag.ReplaceAllString(s, "")
+	r := strings.NewReplacer("&nbsp;", " ", "&amp;", "&", "&lt;", "<", "&gt;", ">", "&quot;", `"`, "&#39;", "'")
+	s = r.Replace(s)
+	return strings.TrimSpace(reSpace.ReplaceAllString(s, " "))
+}
+
+// parseQuiz 从作业页面解析题目
+func parseQuiz(html string) []Question {
+	type block struct {
+		html string
+		qid  string
+	}
+	var blocks []block
+
+	locs := reQBlocks.FindAllStringSubmatchIndex(html, -1)
+	if len(locs) > 0 {
+		for i, loc := range locs {
+			end := len(html)
+			if i+1 < len(locs) {
+				end = locs[i+1][0]
+			}
+			blocks = append(blocks, block{html: html[loc[0]:end], qid: html[loc[2]:loc[3]]})
+		}
+	} else {
+		offs := reTiMu.FindAllStringIndex(html, -1)
+		for i, o := range offs {
+			end := len(html)
+			if i+1 < len(offs) {
+				end = offs[i+1][0]
+			}
+			blocks = append(blocks, block{html: html[o[0]:end]})
+		}
+	}
+
+	var out []Question
+	for _, b := range blocks {
+		h := b.html
+		titleHTML := ""
+		if m := reTitle.FindStringSubmatch(h); m != nil {
+			titleHTML = m[1]
+		} else if len(h) > 800 {
+			titleHTML = h[:800]
+		} else {
+			titleHTML = h
+		}
+		typeLabel := ""
+		if m := reTypeTag.FindStringSubmatch(titleHTML); m != nil {
+			typeLabel = m[1]
+		}
+		score := ""
+		if m := reScore.FindStringSubmatch(titleHTML); m != nil {
+			score = m[1]
+		}
+		stem := stripTags(reTypeTag.ReplaceAllString(titleHTML, ""))
+
+		var opts []Option
+		for _, m := range reOption.FindAllStringSubmatch(h, -1) {
+			opts = append(opts, Option{Value: m[3], Text: stripTags(m[4])})
+		}
+
+		qid := b.qid
+		if qid == "" {
+			for _, re := range []*regexp.Regexp{reQID1, reQID2, reQID3} {
+				if m := re.FindStringSubmatch(h); m != nil {
+					qid = m[1]
+					break
+				}
+			}
+		}
+
+		qtype := 9
+		if m := reQType.FindStringSubmatch(h); m != nil {
+			qtype = atoiOr(m[1], 9)
+		} else {
+			switch {
+			case strings.Contains(typeLabel, "单选"):
+				qtype = 0
+			case strings.Contains(typeLabel, "多选"):
+				qtype = 1
+			case strings.Contains(typeLabel, "判断"):
+				qtype = 3
+			case strings.Contains(typeLabel, "填空"):
+				qtype = 2 // 平台的题型码：2=填空，不是 4
+			}
+		}
+		blanks := len(reBlank.FindAllStringSubmatch(h, -1))
+		out = append(out, Question{
+			QID: qid, QType: qtype, TypeLabel: typeLabel,
+			Stem: stem, Score: score, Options: opts, BlankCount: blanks,
+		})
+	}
+	return out
+}
+
+func parseHidden(html string) map[string]string {
+	out := map[string]string{}
+	for _, tag := range reHidden.FindAllString(html, -1) {
+		nm := reName.FindStringSubmatch(tag)
+		if nm == nil {
+			continue
+		}
+		val := reValue.FindStringSubmatch(tag)
+		v := ""
+		if val != nil {
+			v = strings.ReplaceAll(val[1], "&amp;", "&")
+		}
+		out[nm[1]] = v
+	}
+	return out
+}
+
+// ---------------- 抓取 ----------------
+
+func ktokenOf(c *Client, t Target, chapterID string, page int) string {
+	m, err := fetchCards(c, t, chapterID, page)
+	if err != nil {
+		return ""
+	}
+	if v, ok := m.Defaults["ktoken"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func utEncOf(c *Client, t Target, firstChapter string) string {
+	u := fmt.Sprintf("%s/mycourse/studentstudy?chapterId=%s&courseId=%s&clazzid=%s&cpi=%s&enc=%s&mooc2=1&hidetype=0",
+		smartOrigin, firstChapter, t.CourseID, t.ClazzID, t.CPI, t.Enc)
+	_, _, body, err := c.Follow(u, nil)
+	if err != nil {
+		return ""
+	}
+	if m := reUTEnc.FindStringSubmatch(string(body)); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
+func workPageURL(t Target, w WorkPoint, ktoken, ut string) string {
+	q := "api=1&workId=" + w.WorkID +
+		"&jobid=" + url.QueryEscape(w.JobID) +
+		"&originJobId=" + url.QueryEscape(w.JobID) +
+		"&needRedirect=true&skipHeader=true&knowledgeid=" + w.ChapterID +
+		"&ktoken=" + ktoken + "&cpi=" + t.CPI + "&ut=s&clazzId=" + t.ClazzID +
+		"&type=&enc=" + w.Enc + "&utenc=" + ut + "&mooc2=1&courseid=" + t.CourseID
+	return smartOrigin + "/mooc-ans/api/work?" + q
+}
+
+var browserHeaders = map[string]string{
+	"Accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+	"Sec-Fetch-Dest":            "iframe",
+	"Sec-Fetch-Mode":            "navigate",
+	"Sec-Fetch-Site":            "same-origin",
+	"Upgrade-Insecure-Requests": "1",
+	"Referer":                   smartOrigin + "/ananas/modules/work/index.html?v=1",
+}
+
+// cmdQuizDump 抓题
+func cmdQuizDump() error {
+	t, err := loadTarget()
+	if err != nil {
+		return err
+	}
+	res, err := loadScanFor(t)
+	if err != nil {
+		return err
+	}
+	c := newClient(NewJar())
+	if err := loadSession(c); err != nil {
+		return err
+	}
+
+	seen := map[string]bool{}
+	var quizzes []Quiz
+	ut := ""
+	for _, r := range res.Rows {
+		if r.WorkID == "" || seen[r.WorkID] {
+			continue
+		}
+		seen[r.WorkID] = true
+		if ut == "" {
+			ut = utEncOf(c, t, r.Chapter)
+		}
+		kt := ktokenOf(c, t, r.Chapter, r.Page)
+		w := WorkPoint{ChapterID: r.Chapter, Title: r.Title, WorkID: r.WorkID, JobID: r.JobID, Enc: r.Enc}
+		pageURL := workPageURL(t, w, kt, ut)
+		_ = pageURL
+		_, _, body, err := c.Follow(pageURL, browserHeaders)
+		if err != nil {
+			logf("抓取失败 %s: %v", truncate(r.Title, 20), err)
+			continue
+		}
+		html := string(body)
+		title := ""
+		if m := regexp.MustCompile(`<title>([^<]*)</title>`).FindStringSubmatch(html); m != nil {
+			title = m[1]
+		}
+		// 平台对不同状态返回不同标题：查看作业=已提交，500=服务端异常
+		if strings.Contains(title, "已批阅") || strings.Contains(title, "查看作业") {
+			logf("  跳过（已提交） %s", truncate(r.Title, 24))
+			continue
+		}
+		if strings.TrimSpace(title) == "500" || len(html) < 3000 {
+			logf("  跳过（平台返回错误页，标题 %s，%d 字节） %s", firstNonEmpty(title, "空"), len(html), truncate(r.Title, 20))
+			continue
+		}
+		if os.Getenv("HSC_DUMP_QUIZ_HTML") != "" {
+			_ = os.WriteFile(statePath("quiz-raw-"+fmt.Sprint(len(quizzes))+".html"), []byte(html), 0o644)
+		}
+		qs := parseQuiz(html)
+		action := ""
+		if m := reAction.FindStringSubmatch(html); m != nil {
+			if a := reActVal.FindStringSubmatch(m[0]); a != nil {
+				action = a[1]
+			}
+		}
+		quizzes = append(quizzes, Quiz{
+			Index: len(quizzes), Title: firstNonEmpty(r.Title, w.Title), Work: w,
+			Action: action, PageURL: pageURL, Hidden: parseHidden(html), Questions: qs,
+		})
+		logf("[%d] %d 题  %s", len(quizzes)-1, len(qs), truncate(r.Title, 24))
+		sleepSec(0.2)
+	}
+
+	if err := writeJSON(statePath("quizzes.json"), quizzes); err != nil {
+		return err
+	}
+	// 人类可读版
+	var sb strings.Builder
+	total := 0
+	for _, q := range quizzes {
+		total += len(q.Questions)
+		fmt.Fprintf(&sb, "\n===== [%d] %s（%d题）=====\n\n", q.Index, q.Title, len(q.Questions))
+		for i, qq := range q.Questions {
+			fmt.Fprintf(&sb, "%d %s  [%s qid=%s %s分]\n", i+1, qq.Stem, qq.TypeLabel, qq.QID, qq.Score)
+			for _, o := range qq.Options {
+				fmt.Fprintf(&sb, "  %s. %s\n", o.Value, o.Text)
+			}
+		}
+	}
+	_ = os.WriteFile(statePath("quiz-readable.txt"), []byte(sb.String()), 0o644)
+	sort.Slice(quizzes, func(i, j int) bool { return quizzes[i].Index < quizzes[j].Index })
+	logf("共 %d 份未完成测验，题目总数 %d", len(quizzes), total)
+	return nil
+}
+
+// Answer 支持字符串、布尔或字符串数组。
+// 必须用别名（=）而不是定义类型，否则 encoding/json 会当成 []byte 处理成 base64。
+type Answer = json.RawMessage
+
+func answerAsString(a Answer) (string, []string) {
+	var s string
+	if err := json.Unmarshal(a, &s); err == nil {
+		return s, nil
+	}
+	var arr []string
+	if err := json.Unmarshal(a, &arr); err == nil {
+		return "", arr
+	}
+	var iface any
+	if err := json.Unmarshal(a, &iface); err == nil {
+		switch v := iface.(type) {
+		case bool:
+			if v {
+				return "true", nil
+			}
+			return "false", nil
+		case float64:
+			return fmt.Sprintf("%v", v), nil
+		}
+	}
+	return "", nil
+}
+
+// submitReason 从平台返回里取出可读原因，不打整坨 JSON
+func submitReason(msg string) string {
+	var out struct {
+		Msg    string `json:"msg"`
+		Error  string `json:"error"`
+		Status bool   `json:"status"`
+	}
+	if err := json.Unmarshal([]byte(msg), &out); err == nil {
+		if m := firstNonEmpty(out.Msg, out.Error); m != "" {
+			return strings.TrimSpace(m)
+		}
+		if !out.Status {
+			return "服务端返回 status=false"
+		}
+	}
+	return truncate(strings.TrimSpace(msg), 60)
+}
+
+// cmdQuizSubmit 交卷
+func cmdQuizSubmit(only int) error {
+	t, err := loadTarget()
+	if err != nil {
+		return err
+	}
+	var quizzes []Quiz
+	if err := readJSON(statePath("quizzes.json"), &quizzes); err != nil {
+		return fmt.Errorf("缺少 state/quizzes.json，先执行 hsc quiz dump")
+	}
+	answers := map[string]map[string]Answer{}
+	if err := readJSON(statePath("answers.json"), &answers); err != nil {
+		return fmt.Errorf("没有 state/answers.json，先执行 hsc quiz solve 或手动写一份")
+	}
+
+	okCount, skipCount, failCount := 0, 0, 0
+	for _, q := range quizzes {
+		if only >= 0 && q.Index != only {
+			continue
+		}
+		ans, has := answers[fmt.Sprint(q.Index)]
+		if !has || len(ans) == 0 {
+			logf("[%d] 没有答案，跳过 %s", q.Index, truncate(q.Title, 20))
+			skipCount++
+			continue
+		}
+		// 交卷前先 /work/validate
+		validateU := fmt.Sprintf("%s/mooc-ans/work/validate?classId=%s&courseId=%s&knowledgeId=%s&cpi=%s",
+			smartOrigin, t.ClazzID, t.CourseID, q.Work.ChapterID, t.CPI)
+		vEnc := ""
+		if _, _, vb, verr := c0Follow(validateU, q.PageURL); verr == nil {
+			var arr []any
+			if json.Unmarshal(vb, &arr) == nil && len(arr) > 0 {
+				vEnc = fmt.Sprint(arr[0])
+			}
+		}
+
+		form := url.Values{}
+		for k, v := range q.Hidden {
+			form.Set(k, v)
+		}
+		form.Set("enc", vEnc)
+		form.Set("pyFlag", "")
+		var qids []string
+		for _, qq := range q.Questions {
+			if qq.QID != "" {
+				qids = append(qids, qq.QID)
+			}
+		}
+		form.Set("answerwqbid", strings.Join(qids, ",")+",")
+
+		filled := 0
+		for _, qq := range q.Questions {
+			raw, ok := ans[qq.QID]
+			if !ok {
+				continue
+			}
+			str, arr := answerAsString(raw)
+			if str == "" && len(arr) == 0 {
+				continue
+			}
+			isBlank := qq.QType == 2 || strings.Contains(qq.TypeLabel, "填空")
+			if isBlank {
+				parts := arr
+				if len(parts) == 0 {
+					parts = strings.Split(str, "||")
+				}
+				type item struct {
+					Content string `json:"content"`
+					Name    string `json:"name"`
+				}
+				var items []item
+				for i, p := range parts {
+					items = append(items, item{Content: p, Name: fmt.Sprint(i + 1)})
+					form.Set(fmt.Sprintf("answerEditor%s%d", qq.QID, i+1), p)
+				}
+				b, _ := json.Marshal(items)
+				form.Set("answer"+qq.QID, string(b))
+			} else {
+				if len(arr) > 0 {
+					form.Set("answer"+qq.QID, strings.Join(arr, ""))
+				} else {
+					form.Set("answer"+qq.QID, str)
+				}
+			}
+			if form.Get("answertype"+qq.QID) == "" {
+				form.Set("answertype"+qq.QID, fmt.Sprint(qq.QType))
+			}
+			filled++
+		}
+
+		// 页面的 form action 有三种形态，必须落到 /mooc-ans/work/ 而不是 /mooc-ans/api/
+		// （后者是 404，练习题页面给的就是相对地址，按页面路径解析会拼错）
+		action := q.Action
+		switch {
+		case action == "":
+			action = smartOrigin + "/mooc-ans/work/addStudentWorkNewWeb"
+		case strings.HasPrefix(action, "addStudentWorkNewWeb"):
+			action = smartOrigin + "/mooc-ans/work/" + action
+		case strings.Contains(action, "/mooc-ans/api/addStudentWorkNewWeb"):
+			action = strings.Replace(action, "/mooc-ans/api/addStudentWorkNewWeb", "/mooc-ans/work/addStudentWorkNewWeb", 1)
+			action = resolveURL(q.PageURL, action)
+		default:
+			action = resolveURL(q.PageURL, action)
+		}
+		sep := "?"
+		if strings.Contains(action, "?") {
+			sep = "&"
+		}
+		action += sep + "ua=pc&formType=post&saveStatus=1&pos=&version=1"
+
+		c := c0Client()
+		_, body, err := c.Do("POST", action, form, map[string]string{
+			"X-Requested-With": "XMLHttpRequest",
+			"Content-Type":     "application/x-www-form-urlencoded; charset=UTF-8",
+			"Referer":          q.PageURL,
+			"Origin":           smartOrigin,
+		})
+		msg := strings.TrimSpace(string(body))
+		if err != nil {
+			logf("[%d] 提交失败: %v", q.Index, err)
+			failCount++
+			continue
+		}
+		if strings.HasPrefix(strings.TrimSpace(msg), "<") {
+			failCount++
+			reason := "平台返回 HTML 错误页"
+			if m := regexp.MustCompile(`<title>([^<]*)</title>`).FindStringSubmatch(msg); m != nil {
+				reason += "（标题 " + strings.TrimSpace(m[1]) + "）"
+			}
+			if regexp.MustCompile(`查看作业|已提交|已批阅`).MatchString(msg) {
+				reason = "作业已提交过，不能重复提交"
+			}
+			logf("[%d] 提交失败: %s", q.Index, reason)
+			continue
+		}
+		ok := strings.Contains(msg, `"status":true`) || strings.Contains(msg, "success")
+		if ok {
+			okCount++
+			logf("[%d] %d/%d 题  已提交", q.Index, filled, len(q.Questions))
+		} else {
+			failCount++
+			logf("[%d] 提交失败: %s", q.Index, submitReason(msg))
+		}
+		sleepSec(0.3)
+	}
+	if okCount+skipCount+failCount == 0 {
+		logf("没有可提交的测验（state/quizzes.json 里没有未完成的）")
+		return nil
+	}
+	logf("提交完成：成功 %d，跳过 %d，失败 %d", okCount, skipCount, failCount)
+	return nil
+}
+
+// 复用同一个 jar 的客户端（交卷要持续用同一会话）
+var sharedClient *Client
+
+func c0Client() *Client {
+	if sharedClient == nil {
+		sharedClient = newClient(NewJar())
+		_ = sharedClient.Jar.Load()
+	}
+	return sharedClient
+}
+
+func c0Follow(u, referer string) (*Client, string, []byte, error) {
+	c := c0Client()
+	h := map[string]string{"X-Requested-With": "XMLHttpRequest"}
+	if referer != "" {
+		h["Referer"] = referer
+	}
+	_, finalURL, body, err := c.Follow(u, h)
+	return c, finalURL, body, err
+}
