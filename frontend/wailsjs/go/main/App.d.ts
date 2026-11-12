@@ -13,6 +13,8 @@ export function CheckSession():Promise<hsc.CheckResult>;
 
 export function ClearDebugLog():Promise<void>;
 
+export function ClearLocalSession():Promise<hsc.SessionInfo>;
+
 export function ClearQuizBank():Promise<hsc.QuizBankInfo>;
 
 export function CompleteDocs():Promise<hsc.CourseDetail>;

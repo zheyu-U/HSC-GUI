@@ -106,6 +106,15 @@
 删除本机保存的账号凭据（加密文件或明文 `cred.txt`），**不动当前登录态**。
 返回刷新后的 `SessionInfo`，账号菜单里的“记住账号”会变成未保存。
 
+### ClearLocalSession() -> SessionInfo
+
+只清本地登录态（`state/auth/cookies.json`、`visitor.json`），**不通知 CAS**，
+课程配置和 `course/scan/quizzes` 缓存全部保留。用于账号被平台踢掉、页面解析失败时
+先清掉失效 cookie 再重新登录。返回刷新后的 `SessionInfo`。
+
+前端在解析类错误（如“列表里没解析到课程”“页面结构变化”）出现时会先调
+`CheckSession` 确认；只有确认会话无效才调本方法，网络错误不会清本地登录态。
+
 ### ListCourses(refresh) -> CourseItem[]
 
 获取当前账号的课程列表，需要已登录。

@@ -13,7 +13,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-const appVersion = "0.9.0"
+const appVersion = "0.9.1"
 
 // App 是暴露给前端的绑定对象，方法清单同步维护在 docs/api.md。
 type App struct {
@@ -217,6 +217,18 @@ func (a *App) Logout(all bool) (hsc.LogoutResult, error) {
 	}
 	a.record("结果", "Logout: "+res.Message)
 	return res, nil
+}
+
+// ClearLocalSession 只清本地登录态（cookie），不通知 CAS；用于账号被踢后重新登录。
+func (a *App) ClearLocalSession() (hsc.SessionInfo, error) {
+	a.record("调用", "ClearLocalSession")
+	info, err := hsc.ClearLocalSession()
+	if err != nil {
+		a.record("错误", "ClearLocalSession: "+err.Error())
+		return info, err
+	}
+	a.record("结果", info.Message)
+	return info, nil
 }
 
 // ForgetCredentials 删除本机保存的账号凭据，保留当前登录态。

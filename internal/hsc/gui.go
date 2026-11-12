@@ -523,6 +523,30 @@ func Logout(all bool) (LogoutResult, error) {
 	return out, nil
 }
 
+// ClearLocalSession 只清本地 cookie，不通知 CAS，用于登录态被平台踢掉后的修复。
+// 课程配置和本地缓存（course/scan/quizzes）保留，重新登录后可以继续用。
+func ClearLocalSession() (SessionInfo, error) {
+	if err := InitState(); err != nil {
+		return SessionInfo{}, err
+	}
+	removed := 0
+	for _, name := range []string{"cookies.json", "visitor.json"} {
+		if fileExists(statePath(name)) && os.Remove(statePath(name)) == nil {
+			removed++
+		}
+	}
+	info, err := SessionStatus()
+	if err != nil {
+		return info, err
+	}
+	if removed == 0 {
+		info.Message = "本地没有登录态"
+	} else {
+		info.Message = "登录态已失效，已清掉本地 cookie，请重新登录"
+	}
+	return info, nil
+}
+
 // ---- 课程与任务点 ----
 
 // CourseChapter 章节视图，标题可能为空（上游章节接口不返回标题）。

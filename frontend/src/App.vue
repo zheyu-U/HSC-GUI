@@ -6,6 +6,7 @@ import {
   CancelQRLogin,
   CheckSession,
   ClearDebugLog,
+  ClearLocalSession,
   CompleteDocs,
   DebugInfo,
   DebugLog,
@@ -122,6 +123,7 @@ const quizSolveState = ref({
 const quizPeekItems = ref([])
 const quizPeekBusy = ref(false)
 const quizPeekOpen = ref(false)
+const sessionRepairing = ref(false)
 
 const docBusy = ref(false)
 const playRunning = ref(false)
@@ -311,18 +313,58 @@ function setNotice(message, kind) {
 }
 
 const AUTH_HINTS = ['未登录', '登录态', '会话', 'cookie', '重新登录', '登录已失效']
+const PARSE_HINTS = ['解析', '页面结构', '返回内容过短', '没解析到', '没有解析到', '缺少 state']
 
 function isAuthError(message) {
   return AUTH_HINTS.some((hint) => String(message).includes(hint))
 }
 
-// API 报登录态失效时统一提示并回登录页；其他错误保持原文展示。
+function looksLikeParseError(message) {
+  return PARSE_HINTS.some((hint) => String(message).includes(hint))
+}
+
+// 登录态被平台踢掉时，解析错误往往看不出是登录问题；这里用一次站点校验确认，
+// 确认失效就清掉本地 cookie、回登录页，课程和测验缓存保留。
+async function repairInvalidSession() {
+  if (sessionRepairing.value) {
+    return false
+  }
+  sessionRepairing.value = true
+  try {
+    const res = await CheckSession()
+    if (res && !res.ok && /会话无效|被踢到|未登录|登录态/.test(res.message || '')) {
+      try {
+        session.value = await ClearLocalSession()
+      } catch (e) {
+        await refreshSession()
+      }
+      view.value = 'login'
+      justLoggedIn.value = false
+      showPage('login')
+      setNotice('登录态已失效，已清掉本地登录信息，请重新登录', 'error')
+      return true
+    }
+  } catch (e) {
+    // 网络错误不清理本地登录态，避免误判
+  } finally {
+    sessionRepairing.value = false
+  }
+  return false
+}
+
+// API 报登录态失效时统一提示并回登录页；解析类错误先确认会话是否真的失效。
 async function handleActionError(e, prefix) {
   const message = friendly(e)
   if (isAuthError(message)) {
+    if (await repairInvalidSession()) {
+      return
+    }
     await refreshSession()
     showPage('login')
     setNotice('登录态已失效，请重新登录', 'error')
+    return
+  }
+  if (looksLikeParseError(message) && await repairInvalidSession()) {
     return
   }
   setNotice(prefix ? prefix + '：' + message : message, 'error')
@@ -335,7 +377,24 @@ async function handleInlineError(e, apply) {
     await handleActionError(e)
     return
   }
+  if (looksLikeParseError(message) && await repairInvalidSession()) {
+    return
+  }
   apply(message)
+}
+
+async function checkLoginState() {
+  closeMenu()
+  try {
+    const res = await CheckSession()
+    if (res && !res.ok && /会话无效|被踢到|未登录|登录态/.test(res.message || '')) {
+      await repairInvalidSession()
+      return
+    }
+    setNotice(res && res.ok ? '登录态有效' : (res.message || '检查失败'), res && res.ok ? 'ok' : 'error')
+  } catch (e) {
+    setNotice('检查登录态失败: ' + friendly(e), 'error')
+  }
 }
 
 function emptyPlayState() {
@@ -1259,6 +1318,10 @@ async function bootstrap() {
   await refreshSession()
   if (loggedIn.value) {
     loadCourseDetail()
+    if (session.value && session.value.hasTarget) {
+      // 启动时顺便校验一次登录态：被平台踢掉时自动清 cookie 并回登录页
+      repairInvalidSession()
+    }
   }
   if (mode.value.debug) {
     refreshDebug()
@@ -1331,6 +1394,7 @@ onUnmounted(() => {
               <div class="menu-row"><span>登录状态</span><span class="v">{{ loggedIn ? '有效' : '无' }}</span></div>
               <div class="menu-row"><span>记住账号</span><span class="v">{{ session && session.credSaved ? '已保存' : '未保存' }}</span></div>
               <div class="menu-row"><span>课程</span><span class="v">{{ session && session.hasTarget ? '已配置' : '未配置' }}</span></div>
+              <button class="menu-action" @click="checkLoginState">检查登录态</button>
               <button v-if="session && session.credSaved" class="menu-action" @click="forgetCredentials">忘记保存的账号</button>
               <button class="menu-danger" @click="doLogout(false)">退出登录</button>
               <button v-if="session && session.credSaved" class="menu-danger" @click="doLogout(true)">退出并清除凭据</button>

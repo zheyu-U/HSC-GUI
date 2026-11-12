@@ -22,6 +22,10 @@ export function ClearDebugLog() {
   return window['go']['main']['App']['ClearDebugLog']();
 }
 
+export function ClearLocalSession() {
+  return window['go']['main']['App']['ClearLocalSession']();
+}
+
 export function ClearQuizBank() {
   return window['go']['main']['App']['ClearQuizBank']();
 }

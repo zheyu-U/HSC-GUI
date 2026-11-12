@@ -360,3 +360,32 @@ func TestForgetCredentialsRemovesSavedCred(t *testing.T) {
 		t.Fatalf("提示不像忘记凭据: %s", info.Message)
 	}
 }
+
+func TestClearLocalSessionRemovesOnlyCookies(t *testing.T) {
+	_ = InitState()
+	useTempState(t)
+	if err := os.MkdirAll(filepath.Dir(statePath("cookies.json")), 0o755); err != nil {
+		t.Fatalf("建目录失败: %v", err)
+	}
+	if err := os.WriteFile(statePath("cookies.json"), []byte(`{"smartcourse.hust.edu.cn":{}}`), 0o644); err != nil {
+		t.Fatalf("写 cookie 失败: %v", err)
+	}
+	writeTestJSON(t, "target.json", Target{Name: "课程", CourseID: "c1", ClazzID: "k1"})
+
+	info, err := ClearLocalSession()
+	if err != nil {
+		t.Fatalf("清理登录态失败: %v", err)
+	}
+	if fileExists(statePath("cookies.json")) {
+		t.Fatalf("cookie 文件没有被清掉")
+	}
+	if info.LoggedIn {
+		t.Fatalf("清理后仍然显示已登录")
+	}
+	if !strings.Contains(info.Message, "重新登录") {
+		t.Fatalf("提示不像要求重新登录: %s", info.Message)
+	}
+	if _, ok := loadTargetIfExists(); !ok {
+		t.Fatalf("课程配置不应该被清理")
+	}
+}
