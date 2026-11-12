@@ -1,5 +1,5 @@
 <script setup>
-import {computed, onMounted, onUnmounted, ref} from 'vue'
+import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
 import {
   AppMode,
   CancelPlay,
@@ -312,6 +312,12 @@ function showPage(name) {
   if ((name === 'coursehome' || name === 'video' || name === 'doc' || name === 'quiz') && !hasCourse.value) {
     name = loggedIn.value ? 'course' : 'login'
   }
+  if (page.value !== name) {
+    window.scrollTo(0, 0)
+  }
+  if (page.value === 'coursehome' || name === 'coursehome') {
+    resetCoursehomeFade()
+  }
   page.value = name
   closeMenu()
   setNotice('')
@@ -369,6 +375,70 @@ function openVideoChapter(ch) {
   openChapterId.value = ch.id
   showPage('video')
 }
+
+// 课程主页滚动动画：标题和入口卡在视口里定住，课程结构面板升上来盖住时按滚动进度淡出。
+let coursehomeFadeFrame = 0
+
+function resetCoursehomeFade() {
+  const head = document.querySelector('.page-head-center')
+  if (head) {
+    head.style.opacity = ''
+    head.style.transform = ''
+  }
+  const cards = document.querySelector('.entry-list')
+  if (cards) {
+    cards.style.opacity = ''
+    cards.style.transform = ''
+  }
+}
+
+function updateCoursehomeFade() {
+  if (page.value !== 'coursehome') {
+    return
+  }
+  const root = document.querySelector('.coursehome-page')
+  if (!root) {
+    return
+  }
+  const head = root.querySelector('.page-head-center')
+  const cards = root.querySelector('.entry-list')
+  const panel = root.querySelector('.panel')
+  if (!head || !cards || !panel) {
+    return
+  }
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    head.style.opacity = ''
+    head.style.transform = ''
+    cards.style.opacity = ''
+    cards.style.transform = ''
+    return
+  }
+  const viewport = window.innerHeight || 720
+  const scrolled = window.scrollY || document.documentElement.scrollTop || 0
+  const panelTop = panel.getBoundingClientRect().top + scrolled
+  const distance = Math.max(180, Math.min(panelTop - viewport * 0.34, 560))
+  const linear = Math.min(1, Math.max(0, scrolled / distance))
+  const ease = (value) => value * value * (3 - 2 * value)
+  const headProgress = ease(linear)
+  const cardsProgress = ease(Math.min(1, Math.max(0, (linear - 0.08) / 0.92)))
+  const shift = Math.min(scrolled, distance)
+  head.style.opacity = String(1 - headProgress)
+  head.style.transform = `translate3d(0, ${shift.toFixed(1)}px, 0)`
+  cards.style.opacity = String(1 - cardsProgress)
+  cards.style.transform = `translate3d(0, ${shift.toFixed(1)}px, 0)`
+}
+
+function scheduleCoursehomeFade() {
+  if (coursehomeFadeFrame) {
+    return
+  }
+  coursehomeFadeFrame = requestAnimationFrame(() => {
+    coursehomeFadeFrame = 0
+    updateCoursehomeFade()
+  })
+}
+
+watch([page, courseDetail], scheduleCoursehomeFade, {flush: 'post'})
 
 function stopQrTimer() {
   if (qrTimer) {
@@ -873,6 +943,8 @@ onMounted(() => {
   offPlay = EventsOn('play:progress', onPlayEvent)
   document.addEventListener('click', onDocumentClick)
   window.addEventListener('keydown', onKeydown)
+  window.addEventListener('scroll', scheduleCoursehomeFade, {passive: true})
+  window.addEventListener('resize', scheduleCoursehomeFade)
 })
 
 onUnmounted(() => {
@@ -889,6 +961,12 @@ onUnmounted(() => {
   }
   document.removeEventListener('click', onDocumentClick)
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('scroll', scheduleCoursehomeFade)
+  window.removeEventListener('resize', scheduleCoursehomeFade)
+  if (coursehomeFadeFrame) {
+    cancelAnimationFrame(coursehomeFadeFrame)
+    coursehomeFadeFrame = 0
+  }
 })
 </script>
 
@@ -954,7 +1032,7 @@ onUnmounted(() => {
       </section>
     </main>
 
-    <main v-else class="subpage">
+    <main v-else class="subpage" :class="{'coursehome-page': page === 'coursehome'}">
       <header class="page-head" :class="{'page-head-center': page === 'coursehome'}">
         <div class="page-head-text">
           <h1 class="page-title">{{ pageTitle }}</h1>
@@ -1648,11 +1726,26 @@ onUnmounted(() => {
 .page-head-center {
   justify-content: center;
   text-align: center;
-  margin-bottom: 120px;
+  --coursehome-drop: clamp(48px, 10vh, 100px);
+  margin-top: var(--coursehome-drop);
+  margin-bottom: calc(144px - var(--coursehome-drop));
 }
 
 .page-head-center .page-title {
   font-size: 40px;
+}
+
+/* 滚动淡出：标题和入口卡在视口里定住，课程结构面板从下面升上来盖住并让它们淡出 */
+.coursehome-page .page-head-center,
+.coursehome-page .entry-list {
+  position: relative;
+  z-index: 1;
+  will-change: opacity, transform;
+}
+
+.coursehome-page .panel {
+  position: relative;
+  z-index: 2;
 }
 
 .page-title {
