@@ -101,6 +101,11 @@
 | removed | string[] | 实际删除的文件名，如 `cookies.json`、`cred.enc.json` |
 | message | string | 结果说明，可直接展示 |
 
+### ForgetCredentials() -> SessionInfo
+
+删除本机保存的账号凭据（加密文件或明文 `cred.txt`），**不动当前登录态**。
+返回刷新后的 `SessionInfo`，账号菜单里的“记住账号”会变成未保存。
+
 ### ListCourses(refresh) -> CourseItem[]
 
 获取当前账号的课程列表，需要已登录。
@@ -117,6 +122,12 @@
 按列表序号选课：写 `state/course/target.json`，必要时重新抓取课程结构。
 序号对应刚拉取的列表（与 CLI `hsc init <序号>` 一致）；抓取可能需要几秒。
 上游实现见 `go/courses.go` 的 `switchCourseOpt`、`go/course.go` 的 `crawlCourse`。
+
+### SelectCourseByURL(raw) -> CourseDetail
+
+从课程页链接选课：解析 URL 里的 `courseid` / `clazzid` / `cpi` / `enc`，写
+`state/course/target.json` 后立刻抓取课程结构。链接里没有 `courseid` 或 `clazzid`
+时 reject，提示从课程页地址栏复制完整链接。上游解析见 `go/init_cmd.go` 的 `targetFromURL`。
 
 ### RefreshCourse() -> CourseDetail
 
@@ -155,14 +166,15 @@
 完成未完成的文档任务（对应上游 `hsc doc`）：调用上游 `cmdDoc` 逐个完成，再重新扫描
 `scan.json` 刷新状态。未扫描时 reject，提示先点“扫描文档任务”。
 
-### StartPlay(objectID, speed) -> PlayStartResult
+### StartPlay(objectID, speed, limit) -> PlayStartResult
 
 后台播放视频任务点（对应上游 `hsc play`）。立即返回，进度通过 `play:progress` 事件推送。
 
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
-| objectID | string | 为空时播放全部未完成任务点；给值只播这一个视频 |
+| objectID | string | 为空时播放未完成任务点；给值只播这一个视频 |
 | speed | number | 倍速，默认 1；限 1 倍速的任务点会自动按 1 倍播放 |
+| limit | number | 大于 0 时本次最多处理这么多个任务点（objectID 模式忽略）；0 表示全部 |
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |

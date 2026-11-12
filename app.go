@@ -219,6 +219,18 @@ func (a *App) Logout(all bool) (hsc.LogoutResult, error) {
 	return res, nil
 }
 
+// ForgetCredentials 删除本机保存的账号凭据，保留当前登录态。
+func (a *App) ForgetCredentials() (hsc.SessionInfo, error) {
+	a.record("调用", "ForgetCredentials")
+	info, err := hsc.ForgetCredentials()
+	if err != nil {
+		a.record("错误", "ForgetCredentials: "+err.Error())
+		return info, err
+	}
+	a.record("结果", info.Message)
+	return info, nil
+}
+
 // ListCourses 获取当前账号的课程列表；refresh 为 true 时重新拉取。
 func (a *App) ListCourses(refresh bool) ([]hsc.CourseItem, error) {
 	a.record("调用", fmt.Sprintf("ListCourses refresh=%v", refresh))
@@ -237,6 +249,18 @@ func (a *App) SelectCourse(index int) (hsc.CourseDetail, error) {
 	detail, err := hsc.SelectCourse(index)
 	if err != nil {
 		a.record("错误", "SelectCourse: "+err.Error())
+		return detail, err
+	}
+	a.record("结果", "已选择课程: "+detail.Target.Name)
+	return detail, nil
+}
+
+// SelectCourseByURL 从课程链接选择课程，写 target 后抓取课程结构。
+func (a *App) SelectCourseByURL(raw string) (hsc.CourseDetail, error) {
+	a.record("调用", "SelectCourseByURL")
+	detail, err := hsc.SelectCourseByURL(raw)
+	if err != nil {
+		a.record("错误", "SelectCourseByURL: "+err.Error())
 		return detail, err
 	}
 	a.record("结果", "已选择课程: "+detail.Target.Name)
@@ -289,10 +313,10 @@ func (a *App) CompleteDocs() (hsc.CourseDetail, error) {
 	return detail, nil
 }
 
-// StartPlay 后台播放视频任务点，进度经 play:progress 事件推送。
-func (a *App) StartPlay(objectID string, speed float64) (hsc.PlayStartResult, error) {
-	a.record("调用", fmt.Sprintf("StartPlay objectId=%q speed=%g", objectID, speed))
-	res, err := hsc.StartPlay(objectID, speed, func(ev hsc.PlayEvent) {
+// StartPlay 后台播放视频任务点，limit 大于 0 时最多处理这么多个，进度经 play:progress 事件推送。
+func (a *App) StartPlay(objectID string, speed float64, limit int) (hsc.PlayStartResult, error) {
+	a.record("调用", fmt.Sprintf("StartPlay objectId=%q speed=%g limit=%d", objectID, speed, limit))
+	res, err := hsc.StartPlay(objectID, speed, limit, func(ev hsc.PlayEvent) {
 		if ev.State != "progress" {
 			a.record("事件", "play "+ev.State+" "+ev.Message)
 		}

@@ -626,6 +626,46 @@ func SelectCourse(index int) (CourseDetail, error) {
 	return buildCourseDetail()
 }
 
+// ForgetCredentials 删除本机保存的账号凭据，不动当前登录态。
+func ForgetCredentials() (SessionInfo, error) {
+	if err := InitState(); err != nil {
+		return SessionInfo{}, err
+	}
+	removed := forgetCreds()
+	info, err := SessionStatus()
+	if err != nil {
+		return info, err
+	}
+	if len(removed) == 0 {
+		info.Message = "本机没有保存的账号"
+	} else {
+		info.Message = "已忘记保存的账号，当前登录态保留"
+	}
+	return info, nil
+}
+
+// SelectCourseByURL 从课程链接选课：解析 courseid/clazzid/cpi/enc，写 target.json 后抓结构。
+func SelectCourseByURL(raw string) (CourseDetail, error) {
+	if err := InitState(); err != nil {
+		return CourseDetail{}, err
+	}
+	t := targetFromURL(strings.TrimSpace(raw))
+	if t.CourseID == "" || t.ClazzID == "" {
+		return CourseDetail{}, fmt.Errorf("链接里没有 courseid 或 clazzid，请从课程页地址栏复制完整链接")
+	}
+	c := newClient(NewJar())
+	if err := loadSession(c); err != nil {
+		return CourseDetail{}, fmt.Errorf("未登录，先完成登录再选择课程")
+	}
+	if err := writeJSON(statePath("target.json"), t); err != nil {
+		return CourseDetail{}, fmt.Errorf("保存课程参数失败: %w", err)
+	}
+	if _, err := crawlCourse(c, t); err != nil {
+		return CourseDetail{}, fmt.Errorf("按链接选课失败: %w", err)
+	}
+	return buildCourseDetail()
+}
+
 // RefreshCourse 对当前课程重新抓取章节与任务点，写入 state/course/course.json。
 func RefreshCourse() (CourseDetail, error) {
 	if err := InitState(); err != nil {
@@ -817,9 +857,10 @@ var (
 var errPlayCancelled = errors.New("已停止播放")
 
 // StartPlay 后台播放视频任务点：objectID 为空时播放全部未完成的任务点，
-// speed 为倍速，限 1 倍速的任务点会自动降回 1 倍。
+// speed 为倍速，limit 大于 0 时最多处理这么多个（objectID 模式忽略 limit），
+// 限 1 倍速的任务点会自动降回 1 倍。
 // 进度通过 onEvent 推送；通过一个就把状态写回 course.json，CLI 与 GUI 都能读到。
-func StartPlay(objectID string, speed float64, onEvent func(PlayEvent)) (PlayStartResult, error) {
+func StartPlay(objectID string, speed float64, limit int, onEvent func(PlayEvent)) (PlayStartResult, error) {
 	if err := InitState(); err != nil {
 		return PlayStartResult{}, err
 	}
@@ -873,6 +914,9 @@ func StartPlay(objectID string, speed float64, onEvent func(PlayEvent)) (PlaySta
 			continue
 		}
 		todo = append(todo, v)
+	}
+	if objectID == "" && limit > 0 && len(todo) > limit {
+		todo = todo[:limit]
 	}
 	if len(todo) == 0 {
 		reset()

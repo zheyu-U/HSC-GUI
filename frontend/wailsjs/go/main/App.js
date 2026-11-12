@@ -38,6 +38,10 @@ export function DumpQuizzes() {
   return window['go']['main']['App']['DumpQuizzes']();
 }
 
+export function ForgetCredentials() {
+  return window['go']['main']['App']['ForgetCredentials']();
+}
+
 export function GetCourseDetail() {
   return window['go']['main']['App']['GetCourseDetail']();
 }
@@ -74,6 +78,10 @@ export function SelectCourse(arg1) {
   return window['go']['main']['App']['SelectCourse'](arg1);
 }
 
+export function SelectCourseByURL(arg1) {
+  return window['go']['main']['App']['SelectCourseByURL'](arg1);
+}
+
 export function SessionStatus() {
   return window['go']['main']['App']['SessionStatus']();
 }
@@ -82,8 +90,8 @@ export function StartCaptcha() {
   return window['go']['main']['App']['StartCaptcha']();
 }
 
-export function StartPlay(arg1, arg2) {
-  return window['go']['main']['App']['StartPlay'](arg1, arg2);
+export function StartPlay(arg1, arg2, arg3) {
+  return window['go']['main']['App']['StartPlay'](arg1, arg2, arg3);
 }
 
 export function StartQRLogin() {

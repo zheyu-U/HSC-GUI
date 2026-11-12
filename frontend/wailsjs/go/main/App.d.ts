@@ -21,6 +21,8 @@ export function DebugLog():Promise<Array<main.DebugEntry>>;
 
 export function DumpQuizzes():Promise<hsc.QuizOverview>;
 
+export function ForgetCredentials():Promise<hsc.SessionInfo>;
+
 export function GetCourseDetail():Promise<hsc.CourseDetail>;
 
 export function GetQuizOverview():Promise<hsc.QuizOverview>;
@@ -39,10 +41,12 @@ export function ScanCourse():Promise<hsc.CourseDetail>;
 
 export function SelectCourse(arg1:number):Promise<hsc.CourseDetail>;
 
+export function SelectCourseByURL(arg1:string):Promise<hsc.CourseDetail>;
+
 export function SessionStatus():Promise<hsc.SessionInfo>;
 
 export function StartCaptcha():Promise<hsc.CaptchaView>;
 
-export function StartPlay(arg1:string,arg2:number):Promise<hsc.PlayStartResult>;
+export function StartPlay(arg1:string,arg2:number,arg3:number):Promise<hsc.PlayStartResult>;
 
 export function StartQRLogin():Promise<hsc.QRLoginResult>;

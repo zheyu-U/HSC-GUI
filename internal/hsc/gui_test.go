@@ -336,3 +336,27 @@ func TestBuildQuizOverview(t *testing.T) {
 		t.Fatalf("没有 scan.json 时应提示先扫描: %+v", ov)
 	}
 }
+
+func TestSelectCourseByURLRejectsBadURL(t *testing.T) {
+	useTempState(t)
+	if _, err := SelectCourseByURL("https://example.com/course"); err == nil || !strings.Contains(err.Error(), "courseid") {
+		t.Fatalf("缺少 courseid 应报错，实际: %v", err)
+	}
+}
+
+func TestForgetCredentialsRemovesSavedCred(t *testing.T) {
+	useTempState(t)
+	if err := saveCreds("20260001", "secret"); err != nil {
+		t.Fatalf("保存凭据失败: %v", err)
+	}
+	info, err := ForgetCredentials()
+	if err != nil {
+		t.Fatalf("忘记凭据失败: %v", err)
+	}
+	if info.CredSaved {
+		t.Fatalf("忘记凭据后 credSaved 仍为 true")
+	}
+	if !strings.Contains(info.Message, "忘记") && !strings.Contains(info.Message, "没有") {
+		t.Fatalf("提示不像忘记凭据: %s", info.Message)
+	}
+}

@@ -10,6 +10,7 @@ import {
   DebugInfo,
   DebugLog,
   DumpQuizzes,
+  ForgetCredentials,
   GetCourseDetail,
   GetQuizOverview,
   GetQuizQuestions,
@@ -19,12 +20,13 @@ import {
   RefreshCourse,
   ScanCourse,
   SelectCourse,
+  SelectCourseByURL,
   SessionStatus,
   StartCaptcha,
   StartPlay,
   StartQRLogin,
 } from '../wailsjs/go/main/App'
-import {EventsOff, EventsOn} from '../wailsjs/runtime/runtime'
+import {EventsOff, EventsOn, IsNotificationAvailable, RequestNotificationAuthorization, SendNotification} from '../wailsjs/runtime/runtime'
 
 const TITLES = [
   '今天打算刷什么？',
@@ -76,6 +78,9 @@ const coursePage = ref(1)
 const chapterPage = ref(1)
 const docPage = ref(1)
 const openChapterId = ref('')
+const playLimit = ref(0)
+const courseURL = ref('')
+const courseURLBusy = ref(false)
 
 const quizOverview = ref(null)
 const quizBusy = ref(false)
@@ -146,6 +151,11 @@ const unpassedVideos = computed(() => {
   const list = (courseDetail.value && courseDetail.value.videos) || []
   return list.filter((v) => !v.isPassed)
 })
+const playCount = computed(() => {
+  const total = unpassedVideos.value.length
+  return playLimit.value > 0 ? Math.min(playLimit.value, total) : total
+})
+const playbackPercent = computed(() => Math.min(100, Math.max(0, Math.round(Number(playState.value.percent) || 0))))
 const docs = computed(() => (courseDetail.value && courseDetail.value.docs) || [])
 const docScanned = computed(() => !!(courseDetail.value && courseDetail.value.docScanned))
 const docUnpassed = computed(() => docs.value.filter((d) => !d.isPassed).length)
@@ -254,6 +264,34 @@ function setNotice(message, kind) {
   noticeKind.value = kind || 'info'
 }
 
+const AUTH_HINTS = ['未登录', '登录态', '会话', 'cookie', '重新登录', '登录已失效']
+
+function isAuthError(message) {
+  return AUTH_HINTS.some((hint) => String(message).includes(hint))
+}
+
+// API 报登录态失效时统一提示并回登录页；其他错误保持原文展示。
+async function handleActionError(e, prefix) {
+  const message = friendly(e)
+  if (isAuthError(message)) {
+    await refreshSession()
+    showPage('login')
+    setNotice('登录态已失效，请重新登录', 'error')
+    return
+  }
+  setNotice(prefix ? prefix + '：' + message : message, 'error')
+}
+
+// 页内错误区：登录态失效统一跳登录页，其他错误写回调用方自己的错误状态。
+async function handleInlineError(e, apply) {
+  const message = friendly(e)
+  if (isAuthError(message)) {
+    await handleActionError(e)
+    return
+  }
+  apply(message)
+}
+
 function emptyPlayState() {
   return {
     state: '',
@@ -359,6 +397,36 @@ async function openCourseRow(item) {
   await selectCourse(item.index)
   if (!courseError.value && hasCourse.value) {
     showPage('coursehome')
+  }
+}
+
+async function openCourseByURL() {
+  const raw = courseURL.value.trim()
+  if (!raw || courseURLBusy.value) {
+    return
+  }
+  courseURLBusy.value = true
+  courseError.value = ''
+  setNotice('')
+  try {
+    const detail = await SelectCourseByURL(raw)
+    courseDetail.value = detail
+    playState.value = emptyPlayState()
+    chapterPage.value = 1
+    docPage.value = 1
+    openChapterId.value = ''
+    quizOverview.value = null
+    quizSelected.value = ''
+    quizQuestions.value = []
+    courseURL.value = ''
+    await refreshSession()
+    showPage('coursehome')
+    setNotice('已按链接选择课程', 'ok')
+  } catch (e) {
+    await handleActionError(e, '按链接选课失败')
+  } finally {
+    courseURLBusy.value = false
+    refreshDebug()
   }
 }
 
@@ -617,8 +685,11 @@ async function checkSession() {
   }
 }
 
-async function doLogout() {
+async function doLogout(all) {
   closeMenu()
+  if (all && !window.confirm('退出登录并删除本机保存的账号凭据？下次需要重新输入账号密码。')) {
+    return
+  }
   if (playRunning.value) {
     try {
       await CancelPlay()
@@ -629,7 +700,7 @@ async function doLogout() {
   playRunning.value = false
   playState.value = emptyPlayState()
   try {
-    const res = await Logout(false)
+    const res = await Logout(!!all)
     view.value = 'login'
     justLoggedIn.value = false
     page.value = 'home'
@@ -657,6 +728,19 @@ async function doLogout() {
   }
 }
 
+async function forgetCredentials() {
+  closeMenu()
+  try {
+    const info = await ForgetCredentials()
+    session.value = info
+    setNotice(info.message, 'ok')
+  } catch (e) {
+    setNotice('忘记账号失败: ' + friendly(e), 'error')
+  } finally {
+    refreshDebug()
+  }
+}
+
 async function loadCourseDetail() {
   if (!loggedIn.value) {
     courseDetail.value = null
@@ -665,7 +749,7 @@ async function loadCourseDetail() {
   try {
     courseDetail.value = await GetCourseDetail()
   } catch (e) {
-    courseError.value = friendly(e)
+    await handleInlineError(e, (message) => { courseError.value = message })
   }
 }
 
@@ -679,7 +763,7 @@ async function loadCourses(refresh) {
     courseList.value = await ListCourses(refresh !== false)
     coursePage.value = 1
   } catch (e) {
-    courseError.value = friendly(e)
+    await handleInlineError(e, (message) => { courseError.value = message })
   } finally {
     courseLoading.value = false
     refreshDebug()
@@ -701,7 +785,7 @@ async function selectCourse(index) {
     quizQuestions.value = []
     await refreshSession()
   } catch (e) {
-    courseError.value = friendly(e)
+    await handleInlineError(e, (message) => { courseError.value = message })
   } finally {
     courseBusy.value = false
     refreshDebug()
@@ -719,7 +803,7 @@ async function refreshCourse() {
     quizOverview.value = null
     setNotice('课程结构已更新', 'ok')
   } catch (e) {
-    courseError.value = friendly(e)
+    await handleInlineError(e, (message) => { courseError.value = message })
   } finally {
     courseBusy.value = false
     refreshDebug()
@@ -736,8 +820,9 @@ async function startPlay(objectID) {
   }
   setNotice('')
   playState.value = emptyPlayState()
+  const limit = objectID ? 0 : Number(playLimit.value) || 0
   try {
-    const res = await StartPlay(objectID || '', Number(playSpeed.value) || 1)
+    const res = await StartPlay(objectID || '', Number(playSpeed.value) || 1, limit)
     playRunning.value = true
     if (!playState.value.state) {
       playState.value = {
@@ -758,7 +843,33 @@ async function startPlay(objectID) {
     }
   } catch (e) {
     playRunning.value = false
-    setNotice(friendly(e), 'error')
+    await handleActionError(e)
+  }
+}
+
+function openPlayback() {
+  if (hasCourse.value) {
+    showPage('video')
+  }
+}
+
+async function notifyPlayback(message) {
+  try {
+    let available = await IsNotificationAvailable()
+    if (!available) {
+      await RequestNotificationAuthorization()
+      available = await IsNotificationAvailable()
+    }
+    if (!available || !message) {
+      return
+    }
+    await SendNotification({
+      id: 'hsc-play-' + Date.now(),
+      title: 'hsc 课程助手',
+      body: message,
+    })
+  } catch (e) {
+    // 系统通知不可用时静默，不影响播放结果
   }
 }
 
@@ -787,6 +898,9 @@ function onPlayEvent(ev) {
     if (ev.message) {
       setNotice(ev.message, ev.state === 'finished' ? 'ok' : 'info')
     }
+    if (ev.state === 'finished') {
+      notifyPlayback(ev.message || '播放任务已完成')
+    }
   }
   refreshDebug()
 }
@@ -798,7 +912,7 @@ async function scanDocs() {
     courseDetail.value = await ScanCourse()
     setNotice('文档任务扫描完成', 'ok')
   } catch (e) {
-    setNotice(friendly(e), 'error')
+    await handleActionError(e)
   } finally {
     docBusy.value = false
     refreshDebug()
@@ -812,7 +926,7 @@ async function completeDocs() {
     courseDetail.value = await CompleteDocs()
     setNotice('文档任务处理完成，状态已刷新', 'ok')
   } catch (e) {
-    setNotice(friendly(e), 'error')
+    await handleActionError(e)
   } finally {
     docBusy.value = false
     refreshDebug()
@@ -830,7 +944,7 @@ async function loadQuizOverview() {
       quizQuestions.value = []
     }
   } catch (e) {
-    quizError.value = friendly(e)
+    await handleInlineError(e, (message) => { quizError.value = message })
   } finally {
     quizBusy.value = false
     refreshDebug()
@@ -846,7 +960,7 @@ async function scanForQuiz() {
     quizListPage.value = 1
     setNotice('课程附件扫描完成', 'ok')
   } catch (e) {
-    quizError.value = friendly(e)
+    await handleInlineError(e, (message) => { quizError.value = message })
   } finally {
     quizBusy.value = false
     refreshDebug()
@@ -861,7 +975,7 @@ async function dumpQuizzes() {
     quizListPage.value = 1
     setNotice('题目抓取完成', 'ok')
   } catch (e) {
-    quizError.value = friendly(e)
+    await handleInlineError(e, (message) => { quizError.value = message })
   } finally {
     quizBusy.value = false
     refreshDebug()
@@ -881,7 +995,7 @@ async function openQuiz(item) {
     const detail = await GetQuizQuestions(item.workId)
     quizQuestions.value = detail.questions || []
   } catch (e) {
-    quizError.value = friendly(e)
+    await handleInlineError(e, (message) => { quizError.value = message })
   } finally {
     quizBusy.value = false
     refreshDebug()
@@ -982,6 +1096,9 @@ onUnmounted(() => {
       </div>
 
       <div class="bar-right">
+        <button v-if="playRunning" class="playback-chip" @click="openPlayback">
+          正在播放<span v-if="playbackPercent"> {{ playbackPercent }}%</span>
+        </button>
         <template v-if="loggedIn">
           <div class="user-menu" @click.stop>
             <button class="account-btn" @click="toggleMenu">{{ accountLabel }}</button>
@@ -990,7 +1107,9 @@ onUnmounted(() => {
               <div class="menu-row"><span>登录状态</span><span class="v">{{ loggedIn ? '有效' : '无' }}</span></div>
               <div class="menu-row"><span>记住账号</span><span class="v">{{ session && session.credSaved ? '已保存' : '未保存' }}</span></div>
               <div class="menu-row"><span>课程</span><span class="v">{{ session && session.hasTarget ? '已配置' : '未配置' }}</span></div>
-              <button class="menu-danger" @click="doLogout">退出登录</button>
+              <button v-if="session && session.credSaved" class="menu-action" @click="forgetCredentials">忘记保存的账号</button>
+              <button class="menu-danger" @click="doLogout(false)">退出登录</button>
+              <button v-if="session && session.credSaved" class="menu-danger" @click="doLogout(true)">退出并清除凭据</button>
             </div>
           </div>
           <span v-if="mode.debug" class="debug-tag">debug</span>
@@ -1045,6 +1164,16 @@ onUnmounted(() => {
         </div>
         <div v-else-if="page === 'video'" class="actions">
           <label class="play-speed">
+            数量
+            <select v-model.number="playLimit" :disabled="playRunning">
+              <option :value="0">全部</option>
+              <option :value="1">1 个</option>
+              <option :value="3">3 个</option>
+              <option :value="5">5 个</option>
+              <option :value="10">10 个</option>
+            </select>
+          </label>
+          <label class="play-speed">
             倍速
             <select v-model.number="playSpeed" :disabled="playRunning">
               <option :value="1">1x</option>
@@ -1054,7 +1183,7 @@ onUnmounted(() => {
             </select>
           </label>
           <button class="primary" @click="startPlay('')" :disabled="playRunning || docBusy || !unpassedVideos.length">
-            {{ playRunning ? '播放中' : (unpassedVideos.length ? '播放未完成 ' + unpassedVideos.length + ' 个' : '视频都已完成') }}
+            {{ playRunning ? '播放中' : (playCount ? '播放未完成 ' + playCount + ' 个' : '视频都已完成') }}
           </button>
           <button v-if="playRunning" @click="stopPlay">停止播放</button>
         </div>
@@ -1189,6 +1318,17 @@ onUnmounted(() => {
           </div>
 
           <p class="hint">进入课程后可以看视频任务、文档任务和作业与测验；课程结构在课程主页里。</p>
+
+          <details class="course-link">
+            <summary>用课程链接进入</summary>
+            <div class="course-link-row">
+              <input v-model="courseURL" type="url" placeholder="粘贴课程页地址（含 courseid 与 clazzid）" @keyup.enter="openCourseByURL"/>
+              <button @click="openCourseByURL" :disabled="courseURLBusy || !courseURL.trim() || playRunning">
+                {{ courseURLBusy ? '抓取中' : '按链接进入' }}
+              </button>
+            </div>
+            <p class="hint">链接从浏览器课程页地址栏复制；会覆盖当前课程配置并抓取结构。</p>
+          </details>
         </template>
 
         <template v-else-if="page === 'coursehome'">
@@ -1560,6 +1700,39 @@ onUnmounted(() => {
 
 .menu-danger:hover {
   background: #fff2f2;
+}
+
+.menu-action {
+  width: 100%;
+  margin-top: 4px;
+  padding: 7px 8px;
+  border: none;
+  border-top: 1px solid var(--line-soft);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-action:hover {
+  background: var(--surface-2);
+}
+
+.playback-chip {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid rgba(0, 113, 227, 0.25);
+  border-radius: var(--radius-pill);
+  background: #eaf1ff;
+  color: var(--primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.playback-chip:hover {
+  background: #dfeaFF;
 }
 
 .debug-tag {
@@ -2015,6 +2188,65 @@ button.primary:disabled {
   flex: none;
   font-size: 12px;
   color: var(--primary);
+}
+
+/* 课程链接入口 */
+.course-link {
+  margin-top: 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+}
+
+.course-link summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.course-link-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.course-link-row input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+.course-link-row input:focus {
+  border-color: var(--primary);
+}
+
+.course-link-row button {
+  flex: none;
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.course-link-row button:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.course-link-row button:disabled {
+  color: var(--muted);
+  cursor: default;
 }
 
 .course-summary {
