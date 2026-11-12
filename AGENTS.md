@@ -28,18 +28,21 @@
 - 视频任务：按章节的视频任务列表与单视频播放；数量 / 倍速 / 播放未完成 / 停止在
   标题行，进度在面板里；播放完成会发系统通知（不可用时静默）
 - 文档任务：扫描、完成未完成文档、文档列表
-- 作业与测验：只读浏览列表和已抓取的题目，支持分页；**不做自动答题和交卷**
+- 作业与测验：列表、只读题目、自动答题、交卷、批阅结果、题库；自动答题的设置
+  在独立的“测验设置”页
+- 测验设置：`state/config.toml` 的 LLM 接口、模型、Key、题型、间隔和自动交卷开关；
+  与 CLI 共用同一份配置
 - 关于：版本、登录态说明
 - 调试：只有 debug 构建显示，放环境信息、调用日志和原始会话 JSON
 
-子页面（登录 / 课程 / 课程主页 / 视频任务 / 文档任务 / 作业与测验 / 关于 / 调试）的
-**大标题放在容器外**：页面级标题（32px）在白色面板上方、贴着页面背景，面板只放表单、
-列表、状态等内容；带有操作的子页面，按钮放在标题同一行右侧，窄窗口自动换行。
+子页面（登录 / 课程 / 课程主页 / 视频任务 / 文档任务 / 作业与测验 / 测验设置 /
+关于 / 调试）的**大标题放在容器外**：页面级标题（32px）在白色面板上方、贴着页面背景，
+面板只放表单、列表、状态等内容；带有操作的子页面，按钮放在标题同一行右侧，窄窗口自动换行。
 **课程主页是例外**：标题像首页一样居中（40px），操作按钮移到课程结构区。不要再把标题
 塞回面板里。
 
 顶栏“返回”按页面层级回退：视频任务 / 文档任务 / 作业与测验 → 课程主页 → 课程列表 →
-首页；登录 / 关于 / 调试 → 首页。不要把所有返回都写死回首页。
+首页；测验设置 → 作业与测验；登录 / 关于 / 调试 → 首页。不要把所有返回都写死回首页。
 
 列表分页：课程列表 5 条/页、章节 8 章/页、文档任务 10 条/页、作业与测验 8 份/页、
 题目 5 题/页，用页面里的 `pager actions` 控件（上一页 / 第 x / y 页 / 下一页）。
@@ -70,14 +73,20 @@ Wails v2 没有稳定的多窗口能力，不要用多个窗口拆分；每个�
   任务 URL；扫描与完成后重新扫描刷新状态，界面用 busy 提示
 - 同一时间只允许一个播放任务；播放中禁用选课、重新抓取课程结构和文档任务操作
 
-## 作业与测验浏览
+## 作业与测验
 
-- 只做只读浏览：`gui.go` 的 `GetQuizOverview` / `GetQuizQuestions` 读
-  `state/course/scan.json` 与上游 quiz dump 写的 `state/quiz/quizzes.json`；
-  **不接自动答题、不写 `answers.json`、不调用交卷**
-- 抓题调用上游 `cmdQuizDump`（`go/quiz.go`），已提交或平台错误页由上游跳过，
+- 抓题复用上游 `cmdQuizDump`（`go/quiz.go`），已提交或平台错误页由上游跳过，
   列表里显示“未抓取”；题目通过 `GetQuizQuestions(workId)` 按需取，不一次性塞给前端
-- 作业/测验列表与题目都由前端分页，新增长列表沿用同一套 `pager` 控件
+- 自动答题编排在 `internal/hsc/quiz_auto.go`，复用上游 `loadConfig` / `answerFromBank` /
+  `solveOne` / `storeAnswer` / `loadBank` / `saveBank`，不复制 LLM 协议；进度走
+  `quiz:progress` 事件，答案写 `state/quiz/answers.json`（与旧答案合并）和 `qbank.json`
+- 交卷直接调用上游 `cmdQuizSubmit`（`go/quiz.go`），结果从本次新增的 `state/gcli.log`
+  解析；前端必须二次确认。答卷和交卷是状态变更操作，不要做成后台自动执行
+- 设置页读写 `state/config.toml`（与 CLI 同一份）：LLM 地址/Key/模型/温度/max_tokens/
+  超时、题型、间隔、重试、自动交卷。`api_key` 读回只给脱敏值，保存时留空表示沿用原值
+- 题库缓存 `state/quiz/qbank.json` 用 `loadBank` / `saveBank` 读取和清空；批阅结果用
+  `PeekQuizzes` 只读页面标题，打不开的记未知
+- 列表、题目、批阅结果都由前端分页或分块，新增长列表沿用同一套 `pager` 控件
 
 ## 计划与步骤的维护规范（硬要求）
 
@@ -122,12 +131,14 @@ AI 工具或会话状态。**代理每次动手前先读这两个文件，状态
 - `scripts/sync-upstream.ps1` 从 `codeload.github.com` 下载上游 main 分支 tarball
   （本机 github.com:443 直连不可用，**不要用 `git clone`**），按**功能白名单**复制到
   `internal/hsc/`，改 `package hsc`
-- 白名单分三组，共 22 个文件：
+- 白名单分四组，共 27 个文件：
   - 登录（13）：`config.go httpc.go jar.go jar_uid.go util.go session.go
     creds.go cred_cmd.go cas.go rsa512.go captcha.go login_cmd.go logout.go`
   - 课程与任务点（8）：`courses.go course.go init_cmd.go args.go parallel.go
     scan_doc.go video.go video_refresh.go`
-  - 作业与测验（1）：`quiz.go`（只用于抓题浏览，不接自动答题）
+  - 作业与测验（1）：`quiz.go`
+  - 自动答题（5）：`quiz_solve.go quiz_llm.go quiz_bank.go quiz_peek.go config_toml.go`；
+    GUI 编排在 `internal/hsc/quiz_auto.go`，重跑脚本不会覆盖它
 - 不复制 CLI 入口（`main.go` `help.go` `pause.go`）和仓库里的 `hsc-pr.exe`；
   `args.go` 等辅助文件只在白名单功能需要时加入
 - **不改上游文件逻辑**：GUI 适配集中在新文件 `internal/hsc/gui.go`，包括启动时切到

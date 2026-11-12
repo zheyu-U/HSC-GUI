@@ -13,7 +13,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-const appVersion = "0.8.1"
+const appVersion = "0.9.0"
 
 // App 是暴露给前端的绑定对象，方法清单同步维护在 docs/api.md。
 type App struct {

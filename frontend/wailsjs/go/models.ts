@@ -312,6 +312,20 @@ export namespace hsc {
 	        this.expiresAt = source["expiresAt"];
 	    }
 	}
+	export class QuizBankInfo {
+	    count: number;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new QuizBankInfo(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.count = source["count"];
+	        this.message = source["message"];
+	    }
+	}
 	export class QuizOption {
 	    value: string;
 	    text: string;
@@ -461,7 +475,97 @@ export namespace hsc {
 		    return a;
 		}
 	}
+	export class QuizPeekItem {
+	    index: number;
+	    title: string;
+	    status: string;
 	
+	    static createFrom(source: any = {}) {
+	        return new QuizPeekItem(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.title = source["title"];
+	        this.status = source["status"];
+	    }
+	}
+	
+	export class QuizSettings {
+	    enabled: boolean;
+	    baseUrl: string;
+	    apiKeyMasked: string;
+	    apiKey: string;
+	    model: string;
+	    temperature: number;
+	    maxTokens: number;
+	    timeoutSeconds: number;
+	    autoSubmit: boolean;
+	    types: string[];
+	    delayMs: number;
+	    retries: number;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new QuizSettings(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.enabled = source["enabled"];
+	        this.baseUrl = source["baseUrl"];
+	        this.apiKeyMasked = source["apiKeyMasked"];
+	        this.apiKey = source["apiKey"];
+	        this.model = source["model"];
+	        this.temperature = source["temperature"];
+	        this.maxTokens = source["maxTokens"];
+	        this.timeoutSeconds = source["timeoutSeconds"];
+	        this.autoSubmit = source["autoSubmit"];
+	        this.types = source["types"];
+	        this.delayMs = source["delayMs"];
+	        this.retries = source["retries"];
+	        this.message = source["message"];
+	    }
+	}
+	export class QuizSolveResult {
+	    total: number;
+	    ok: number;
+	    cached: number;
+	    failed: number;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new QuizSolveResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.total = source["total"];
+	        this.ok = source["ok"];
+	        this.cached = source["cached"];
+	        this.failed = source["failed"];
+	        this.message = source["message"];
+	    }
+	}
+	export class QuizSubmitResult {
+	    ok: number;
+	    skipped: number;
+	    failed: number;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new QuizSubmitResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.ok = source["ok"];
+	        this.skipped = source["skipped"];
+	        this.failed = source["failed"];
+	        this.message = source["message"];
+	    }
+	}
 	export class SessionInfo {
 	    loggedIn: boolean;
 	    cookieCount: number;

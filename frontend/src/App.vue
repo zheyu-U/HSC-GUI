@@ -12,19 +12,25 @@ import {
   DumpQuizzes,
   ForgetCredentials,
   GetCourseDetail,
+  GetQuizBank,
   GetQuizOverview,
   GetQuizQuestions,
+  GetQuizSettings,
   ListCourses,
   LoginPassword,
   Logout,
+  PeekQuizzes,
   RefreshCourse,
+  SaveQuizSettings,
   ScanCourse,
   SelectCourse,
   SelectCourseByURL,
   SessionStatus,
+  SolveQuizzes,
   StartCaptcha,
   StartPlay,
   StartQRLogin,
+  SubmitQuizzes,
 } from '../wailsjs/go/main/App'
 import {EventsOff, EventsOn, IsNotificationAvailable, RequestNotificationAuthorization, SendNotification} from '../wailsjs/runtime/runtime'
 
@@ -40,6 +46,14 @@ const CHAPTER_PAGE_SIZE = 8
 const DOC_PAGE_SIZE = 10
 const QUIZ_PAGE_SIZE = 8
 const QUESTION_PAGE_SIZE = 5
+
+const QUIZ_TYPES = [
+  {value: 'choice', label: '单选'},
+  {value: 'multi', label: '多选'},
+  {value: 'judge', label: '判断'},
+  {value: 'fill', label: '填空'},
+  {value: 'essay', label: '简答'},
+]
 
 const page = ref('home')
 const title = ref(TITLES[0])
@@ -89,6 +103,25 @@ const quizSelected = ref('')
 const quizQuestions = ref([])
 const quizListPage = ref(1)
 const quizQuestionPage = ref(1)
+const quizSettings = ref(null)
+const quizSettingsBusy = ref(false)
+const quizSettingsError = ref('')
+const quizBank = ref(null)
+const quizSolving = ref(false)
+const quizSubmitting = ref(false)
+const quizSolveState = ref({
+  state: '',
+  message: '',
+  index: 0,
+  total: 0,
+  question: '',
+  answered: 0,
+  cached: 0,
+  failed: 0,
+})
+const quizPeekItems = ref([])
+const quizPeekBusy = ref(false)
+const quizPeekOpen = ref(false)
 
 const docBusy = ref(false)
 const playRunning = ref(false)
@@ -156,6 +189,13 @@ const playCount = computed(() => {
   return playLimit.value > 0 ? Math.min(playLimit.value, total) : total
 })
 const playbackPercent = computed(() => Math.min(100, Math.max(0, Math.round(Number(playState.value.percent) || 0))))
+const quizSolvePercent = computed(() => {
+  const total = Number(quizSolveState.value.total) || 0
+  if (!total) {
+    return 0
+  }
+  return Math.min(100, Math.max(0, Math.round((Number(quizSolveState.value.index) || 0) / total * 100)))
+})
 const docs = computed(() => (courseDetail.value && courseDetail.value.docs) || [])
 const docScanned = computed(() => !!(courseDetail.value && courseDetail.value.docScanned))
 const docUnpassed = computed(() => docs.value.filter((d) => !d.isPassed).length)
@@ -228,6 +268,9 @@ const pageTitle = computed(() => {
   if (page.value === 'quiz') {
     return '作业与测验'
   }
+  if (page.value === 'settings') {
+    return '测验设置'
+  }
   if (page.value === 'about') {
     return '关于'
   }
@@ -251,6 +294,9 @@ const pageLead = computed(() => {
   }
   if (page.value === 'video' || page.value === 'doc' || page.value === 'quiz') {
     return courseName.value
+  }
+  if (page.value === 'settings') {
+    return '自动答题的接口、题型与交卷选项。'
   }
   return ''
 })
@@ -333,6 +379,7 @@ const PAGE_PARENT = {
   video: 'coursehome',
   doc: 'coursehome',
   quiz: 'coursehome',
+  settings: 'quiz',
 }
 
 function parentPage(name) {
@@ -347,7 +394,7 @@ function showPage(name) {
   if (name === 'debug' && !mode.value.debug) {
     return
   }
-  if ((name === 'coursehome' || name === 'video' || name === 'doc' || name === 'quiz') && !hasCourse.value) {
+  if ((name === 'coursehome' || name === 'video' || name === 'doc' || name === 'quiz' || name === 'settings') && !hasCourse.value) {
     name = loggedIn.value ? 'course' : 'login'
   }
   if (page.value !== name) {
@@ -372,6 +419,13 @@ function showPage(name) {
   }
   if (name === 'quiz' && !quizOverview.value && !quizBusy.value) {
     loadQuizOverview()
+  }
+  if (name === 'quiz' && !quizBank.value) {
+    loadQuizBank()
+  }
+  if (name === 'settings') {
+    loadQuizSettings()
+    loadQuizBank()
   }
   if ((name === 'home' || name === 'debug') && mode.value.debug) {
     refreshDebug()
@@ -719,6 +773,13 @@ async function doLogout(all) {
     quizQuestions.value = []
     quizListPage.value = 1
     quizQuestionPage.value = 1
+    quizSettings.value = null
+    quizBank.value = null
+    quizSolving.value = false
+    quizSubmitting.value = false
+    quizSolveState.value = emptyQuizSolveState()
+    quizPeekItems.value = []
+    quizPeekOpen.value = false
     setNotice(res.message, 'ok')
     await refreshSession()
   } catch (e) {
@@ -982,6 +1043,162 @@ async function dumpQuizzes() {
   }
 }
 
+function emptyQuizSolveState() {
+  return {state: '', message: '', index: 0, total: 0, question: '', answered: 0, cached: 0, failed: 0}
+}
+
+async function loadQuizSettings() {
+  if (quizSettingsBusy.value) {
+    return
+  }
+  quizSettingsBusy.value = true
+  quizSettingsError.value = ''
+  try {
+    const data = await GetQuizSettings()
+    data.types = Array.isArray(data.types) ? data.types : []
+    data.apiKey = ''
+    quizSettings.value = data
+  } catch (e) {
+    await handleInlineError(e, (message) => { quizSettingsError.value = message })
+  } finally {
+    quizSettingsBusy.value = false
+    refreshDebug()
+  }
+}
+
+async function saveQuizSettings() {
+  if (!quizSettings.value || quizSettingsBusy.value) {
+    return
+  }
+  quizSettingsBusy.value = true
+  quizSettingsError.value = ''
+  try {
+    const saved = await SaveQuizSettings({
+      ...quizSettings.value,
+      apiKey: (quizSettings.value.apiKey || '').trim(),
+    })
+    saved.types = Array.isArray(saved.types) ? saved.types : []
+    saved.apiKey = ''
+    quizSettings.value = saved
+    setNotice(saved.message || '设置已保存', 'ok')
+    await loadQuizBank()
+  } catch (e) {
+    await handleInlineError(e, (message) => { quizSettingsError.value = message })
+  } finally {
+    quizSettingsBusy.value = false
+    refreshDebug()
+  }
+}
+
+function toggleQuizType(value) {
+  if (!quizSettings.value) {
+    return
+  }
+  const current = Array.isArray(quizSettings.value.types) ? quizSettings.value.types : []
+  quizSettings.value.types = current.includes(value)
+    ? current.filter((item) => item !== value)
+    : [...current, value]
+}
+
+async function loadQuizBank() {
+  try {
+    quizBank.value = await GetQuizBank()
+  } catch (e) {
+    quizBank.value = null
+  }
+}
+
+async function clearQuizBank() {
+  if (!window.confirm('清空本机题库缓存？自动答题会重新调用接口，已答题目不受影响。')) {
+    return
+  }
+  try {
+    quizBank.value = await ClearQuizBank()
+    setNotice(quizBank.value.message, 'ok')
+  } catch (e) {
+    await handleActionError(e, '清空题库失败')
+  }
+}
+
+async function solveQuizzes() {
+  if (quizSolving.value) {
+    return
+  }
+  if (!window.confirm('开始自动答题？会调用设置里的模型接口，答案只写在本机；如果开了自动交卷会直接提交。')) {
+    return
+  }
+  quizSolving.value = true
+  quizSolveState.value = emptyQuizSolveState()
+  quizError.value = ''
+  setNotice('')
+  try {
+    const res = await SolveQuizzes(-1)
+    setNotice(res.message, res.failed ? 'info' : 'ok')
+    await loadQuizOverview()
+    await loadQuizBank()
+  } catch (e) {
+    await handleActionError(e, '自动答题失败')
+  } finally {
+    quizSolving.value = false
+  }
+}
+
+function onQuizEvent(ev) {
+  if (!ev) {
+    return
+  }
+  quizSolveState.value = {...quizSolveState.value, ...ev}
+  if (ev.state === 'done' || ev.state === 'error') {
+    quizSolving.value = false
+    if (ev.message) {
+      setNotice(ev.message, ev.state === 'error' ? 'error' : 'ok')
+    }
+    if (ev.state === 'done') {
+      loadQuizOverview()
+      loadQuizBank()
+    }
+  }
+}
+
+async function submitQuizzes() {
+  if (quizSubmitting.value) {
+    return
+  }
+  if (!window.confirm('确认交卷？交卷后答案不能再改，平台可能直接批阅。')) {
+    return
+  }
+  quizSubmitting.value = true
+  quizError.value = ''
+  try {
+    const res = await SubmitQuizzes(-1)
+    setNotice(res.message, res.failed ? 'error' : 'ok')
+    await loadQuizOverview()
+  } catch (e) {
+    await handleActionError(e, '交卷失败')
+  } finally {
+    quizSubmitting.value = false
+    refreshDebug()
+  }
+}
+
+async function toggleQuizPeek() {
+  if (quizPeekOpen.value) {
+    quizPeekOpen.value = false
+    return
+  }
+  quizPeekOpen.value = true
+  quizPeekBusy.value = true
+  quizError.value = ''
+  try {
+    quizPeekItems.value = await PeekQuizzes(-1)
+  } catch (e) {
+    quizPeekOpen.value = false
+    await handleInlineError(e, (message) => { quizError.value = message })
+  } finally {
+    quizPeekBusy.value = false
+  }
+}
+
 async function openQuiz(item) {
   if (!item || !item.fetched) {
     return
@@ -1050,11 +1267,13 @@ async function bootstrap() {
 
 let offQr = null
 let offPlay = null
+let offQuiz = null
 
 onMounted(() => {
   bootstrap()
   offQr = EventsOn('login:qr', onQrEvent)
   offPlay = EventsOn('play:progress', onPlayEvent)
+  offQuiz = EventsOn('quiz:progress', onQuizEvent)
   document.addEventListener('click', onDocumentClick)
   window.addEventListener('keydown', onKeydown)
   window.addEventListener('scroll', scheduleCoursehomeFade, {passive: true})
@@ -1072,6 +1291,11 @@ onUnmounted(() => {
     offPlay()
   } else {
     EventsOff('play:progress')
+  }
+  if (typeof offQuiz === 'function') {
+    offQuiz()
+  } else {
+    EventsOff('quiz:progress')
   }
   document.removeEventListener('click', onDocumentClick)
   window.removeEventListener('keydown', onKeydown)
@@ -1197,7 +1421,13 @@ onUnmounted(() => {
         </div>
         <div v-else-if="page === 'quiz'" class="actions">
           <button @click="dumpQuizzes" :disabled="quizBusy || playRunning || !quizOverview || !quizOverview.scanned">抓取题目</button>
-          <button @click="loadQuizOverview" :disabled="quizBusy">刷新列表</button>
+          <button class="primary" @click="solveQuizzes" :disabled="quizBusy || quizSolving || playRunning || !quizOverview || !quizOverview.scanned">
+            {{ quizSolving ? '答题中' : '自动答题' }}
+          </button>
+          <button @click="submitQuizzes" :disabled="quizBusy || quizSubmitting || quizSolving || playRunning || !quizOverview || !quizOverview.scanned">
+            {{ quizSubmitting ? '交卷中' : '交卷' }}
+          </button>
+          <button @click="showPage('settings')">测验设置</button>
         </div>
         <div v-else-if="page === 'debug' && mode.debug" class="actions">
           <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
@@ -1454,6 +1684,37 @@ onUnmounted(() => {
           <p v-if="quizOverview" class="hint">{{ quizOverview.message }}</p>
           <p v-else class="hint">正在读取作业与测验...</p>
 
+          <div class="quiz-tools actions">
+            <button @click="loadQuizOverview" :disabled="quizBusy">刷新列表</button>
+            <button @click="toggleQuizPeek" :disabled="quizPeekBusy">
+              {{ quizPeekOpen ? '收起批阅结果' : (quizPeekBusy ? '读取中' : '批阅结果') }}
+            </button>
+            <span class="hint">题库 {{ quizBank ? quizBank.count : 0 }} 题</span>
+          </div>
+
+          <div v-if="quizPeekOpen" class="quiz-peek">
+            <p v-if="quizPeekBusy" class="hint">正在读取批阅页，网络慢时可能要十几秒...</p>
+            <ul v-else-if="quizPeekItems.length" class="quiz-peek-list">
+              <li v-for="item in quizPeekItems" :key="item.index">
+                <span class="course-index">{{ item.index + 1 }}</span>
+                <span class="quiz-title">{{ item.title }}</span>
+                <span class="hint">{{ item.status }}</span>
+              </li>
+            </ul>
+            <p v-else class="hint">没有可查看的批阅记录。</p>
+          </div>
+
+          <div v-if="quizSolving || quizSolveState.message" class="quiz-progress">
+            <div class="play-line">
+              <span class="play-message">{{ quizSolveState.message || '准备答题' }}</span>
+              <span v-if="quizSolveState.total" class="hint">第 {{ quizSolveState.index }}/{{ quizSolveState.total }} 题</span>
+              <span class="hint">成功 {{ quizSolveState.answered }}，题库 {{ quizSolveState.cached }}，失败 {{ quizSolveState.failed }}</span>
+            </div>
+            <div v-if="quizSolving && quizSolveState.total" class="play-track">
+              <div class="play-fill" :style="{width: quizSolvePercent + '%'}"></div>
+            </div>
+          </div>
+
           <template v-if="quizOverview && quizOverview.scanned">
             <template v-if="quizSelected">
               <div class="quiz-detail-head actions">
@@ -1512,6 +1773,95 @@ onUnmounted(() => {
               </button>
             </div>
             <p class="hint">扫描会逐章读取附件，可能需要十几秒；扫描后“抓取题目”才有内容。</p>
+          </template>
+        </template>
+
+        <template v-else-if="page === 'settings'">
+          <p v-if="quizSettingsError" class="inline-error">{{ quizSettingsError }}</p>
+          <p v-if="!quizSettings" class="hint">正在读取设置...</p>
+
+          <template v-else>
+            <div class="settings-block">
+              <label class="check-row">
+                <input v-model="quizSettings.enabled" type="checkbox"/>
+                <span>启用自动答题</span>
+              </label>
+              <p class="hint">启用后“自动答题”才会调用设置里的模型接口；关闭时其他功能不受影响。</p>
+            </div>
+
+            <div class="settings-grid">
+              <div class="field">
+                <label>接口地址</label>
+                <input v-model.trim="quizSettings.baseUrl" type="url" placeholder="https://api.openai.com/v1"/>
+              </div>
+              <div class="field">
+                <label>API Key</label>
+                <input
+                  v-model="quizSettings.apiKey"
+                  type="password"
+                  autocomplete="off"
+                  :placeholder="quizSettings.apiKeyMasked && quizSettings.apiKeyMasked !== '(未填写)' ? '留空沿用已保存的 Key（' + quizSettings.apiKeyMasked + '）' : '填写 API Key'"
+                />
+              </div>
+              <div class="field">
+                <label>模型</label>
+                <input v-model.trim="quizSettings.model" type="text" placeholder="gpt-4o-mini"/>
+              </div>
+              <div class="field">
+                <label>温度</label>
+                <input v-model.number="quizSettings.temperature" type="number" step="0.1" min="0" max="2"/>
+              </div>
+              <div class="field">
+                <label>max_tokens</label>
+                <input v-model.number="quizSettings.maxTokens" type="number" min="1" max="128000"/>
+              </div>
+              <div class="field">
+                <label>超时（秒）</label>
+                <input v-model.number="quizSettings.timeoutSeconds" type="number" min="1" max="600"/>
+              </div>
+              <div class="field">
+                <label>每题间隔（毫秒）</label>
+                <input v-model.number="quizSettings.delayMs" type="number" min="0" max="60000"/>
+              </div>
+              <div class="field">
+                <label>单题重试次数</label>
+                <input v-model.number="quizSettings.retries" type="number" min="0" max="10"/>
+              </div>
+            </div>
+
+            <div class="settings-block">
+              <span class="settings-label">参与作答的题型</span>
+              <div class="check-list">
+                <label v-for="item in QUIZ_TYPES" :key="item.value" class="check-row compact">
+                  <input type="checkbox" :checked="quizSettings.types.includes(item.value)" @change="toggleQuizType(item.value)"/>
+                  <span>{{ item.label }}</span>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-block">
+              <label class="check-row">
+                <input v-model="quizSettings.autoSubmit" type="checkbox"/>
+                <span>答完直接交卷</span>
+              </label>
+              <p v-if="quizSettings.autoSubmit" class="warn-text">开启后自动答题结束会直接提交，建议先关闭、检查答案后再手动交卷。</p>
+            </div>
+
+            <div class="actions">
+              <button class="primary" @click="saveQuizSettings" :disabled="quizSettingsBusy">
+                {{ quizSettingsBusy ? '保存中' : '保存设置' }}
+              </button>
+              <button @click="loadQuizSettings" :disabled="quizSettingsBusy">重新读取</button>
+            </div>
+            <p class="hint">{{ quizSettings.message }}</p>
+
+            <h3>题库缓存</h3>
+            <div class="actions">
+              <span class="hint">{{ quizBank ? quizBank.message : '题库读取中' }}</span>
+              <button @click="loadQuizBank" :disabled="quizSettingsBusy">刷新</button>
+              <button @click="clearQuizBank" :disabled="quizSettingsBusy">清空题库</button>
+            </div>
+            <p class="hint">设置保存在 state/config.toml，与 hsc 命令行共用。</p>
           </template>
         </template>
 
@@ -2594,6 +2944,102 @@ button.primary:disabled {
 }
 
 /* 题目 */
+/* 自动答题工具区 */
+.quiz-tools {
+  margin: 12px 0 8px;
+}
+
+.quiz-tools .hint {
+  margin: 0;
+}
+
+.quiz-progress {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.quiz-progress .play-line .hint {
+  margin: 0;
+}
+
+.quiz-peek {
+  margin: 10px 0;
+  padding: 4px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+}
+
+.quiz-peek-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.quiz-peek-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid #f5f6f7;
+  font-size: 13px;
+}
+
+.quiz-peek-list li:last-child {
+  border-bottom: none;
+}
+
+.quiz-peek-list .hint {
+  margin: 0;
+  flex: none;
+}
+
+/* 测验设置 */
+.settings-block {
+  margin: 4px 0 16px;
+}
+
+.settings-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 16px;
+  margin: 4px 0 16px;
+}
+
+.settings-grid .field {
+  margin-bottom: 8px;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.check-row input {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+}
+
+.check-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+
 .quiz-detail-head {
   margin-bottom: 12px;
 }
@@ -2780,6 +3226,10 @@ button.primary:disabled {
 
   .page-head-center .page-title {
     font-size: 32px;
+  }
+
+  .settings-grid {
+    grid-template-columns: 1fr;
   }
 }
 

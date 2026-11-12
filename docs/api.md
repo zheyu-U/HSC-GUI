@@ -223,7 +223,95 @@
 | questions | QuizQuestion[] | `qid` `typeLabel` `stem` `score` `options`（`value` `text`）`blankCount` |
 
 - 没有抓过题时 reject，提示先抓取题目
-- 不接自动答题与交卷；不会读写 `state/quiz/answers.json`
+- 只读浏览接口本身不接自动答题与交卷；不会读写 `state/quiz/answers.json`
+- 自动答题与交卷在下面单独的方法里，写的是同一份 `state/quiz/answers.json`
+
+### GetQuizSettings() -> QuizSettings
+
+读取 `state/config.toml` 里的自动答题设置（与 CLI 共用），不发起网络请求。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| enabled | boolean | 是否启用自动答题 |
+| baseUrl | string | 兼容 OpenAI 的接口地址 |
+| apiKeyMasked | string | 已保存 Key 的脱敏值；未填写时为 `(未填写)` |
+| apiKey | string | **读取时恒为空**，只用于保存；保存时留空表示保留原 Key |
+| model | string | 模型名 |
+| temperature | number | 采样温度 0 到 2 |
+| maxTokens | number | 单次最大输出 |
+| timeoutSeconds | number | 请求超时秒数 |
+| autoSubmit | boolean | 答完是否自动交卷 |
+| types | string[] | 参与作答的题型：`choice` `multi` `judge` `fill` `essay` |
+| delayMs | number | 每题间隔毫秒 |
+| retries | number | 单题重试次数 |
+| message | string | 状态说明，可直接展示 |
+
+文件不存在时按上游默认值生成。上游实现见 `go/config_toml.go` 的 `loadConfig`。
+
+### SaveQuizSettings(settings) -> QuizSettings
+
+写回 `state/config.toml`。字段不合法时 reject，错误文本可直接展示（温度 0 到 2、
+max_tokens 1 到 128000、超时 1 到 600 秒、间隔 0 到 60000 毫秒、重试 0 到 10、
+地址必须是 http(s)、题型必须在上面的白名单里）。`apiKey` 留空表示沿用原值。
+
+### SolveQuizzes(only) -> QuizSolveResult
+
+用配置的 LLM 接口自动作答（对应上游 `hsc quiz solve`），写入
+`state/quiz/answers.json`（与旧答案合并）和 `state/quiz/qbank.json`。
+进度通过 `quiz:progress` 事件推送。
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| only | number | `-1` 做全部；`>=0` 只做 `quizzes.json` 里该 Index 的一份 |
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| total | number | 本轮参与作答的题数 |
+| ok | number | 成功题数（含题库命中） |
+| cached | number | 题库命中题数 |
+| failed | number | 失败题数 |
+| message | string | 结果说明，可直接展示 |
+
+- 配置了 `auto_submit=true` 且 `only<0` 时，作答完成后自动调用交卷（与上游一致）
+- 同步阻塞调用，一次只能跑一轮；未启用、没有 Key、没抓题时 reject
+
+### SubmitQuizzes(only) -> QuizSubmitResult
+
+按 `state/quiz/answers.json` 交卷（对应上游 `hsc quiz submit`），只交未完成的。
+
+| 参数 | 类型 | 说明 |
+| --- | --- | --- |
+| only | number | `-1` 交全部；`>=0` 只交该 Index 的一份 |
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| ok | number | 提交成功的份数 |
+| skipped | number | 没答案跳过的份数 |
+| failed | number | 失败的份数 |
+| message | string | 结果说明，可直接展示 |
+
+交卷是状态变更操作，前端必须二次确认。协议与端点在上游 `go/quiz.go` 的 `cmdQuizSubmit`。
+
+### GetQuizBank() / ClearQuizBank() -> QuizBankInfo
+
+读取 / 清空题库缓存 `state/quiz/qbank.json`。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| count | number | 题库题数 |
+| message | string | 状态说明，可直接展示 |
+
+### PeekQuizzes(only) -> QuizPeekItem[]
+
+只读读取每份测验页面标题，判断批阅状态（对应上游 `hsc quiz peek`）。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| index | number | `quizzes.json` 里的 Index（0 起） |
+| title | string | 标题 |
+| status | string | `已批阅` `已提交` `可作答` `未知` |
+
+单份打不开时记 `未知`，不中断；`only` 语义同上。
 
 ### AppMode() -> AppModeInfo
 
@@ -315,6 +403,29 @@
 - `finished`：全部处理完，携带通过 / 失败 / 跳过数量
 - `cancelled`：用户停止播放
 
+### quiz:progress
+
+自动答题进度。前端 `EventsOn('quiz:progress', handler)` 订阅，组件卸载时取消订阅。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| state | string | `starting` `solving` `answer` `done` `error` |
+| message | string | 给用户看的一句话 |
+| index | number | 当前第几题（1 起；done 时等于 total） |
+| total | number | 本轮总题数 |
+| question | string | 当前题 QID；没有 QID 时是截断题干 |
+| answered | number | 已成功题数 |
+| cached | number | 题库命中题数 |
+| failed | number | 失败题数 |
+
+状态含义：
+
+- `starting`：开始作答，message 里是份数和题数
+- `solving`：正在作答某一题
+- `answer`：该题作答完成或失败跳过，继续下一题
+- `done`：全部结束，message 是统计；开了自动交卷时包含交卷结果
+- `error`：致命错误（未启用、没有 Key、没抓题等），本轮结束
+
 ## 上游锚点
 
 - 扫码与账密流程：上游 `go/login_cmd.go`
@@ -325,4 +436,7 @@
 - 播放上报、限速与签名：上游 `go/video.go`；开播前刷新参数：`go/video_refresh.go`
 - 文档任务扫描与完成：上游 `go/scan_doc.go`
 - 作业/测验抓题与解析：上游 `go/quiz.go`（`cmdQuizDump` / `parseQuiz`）
-- GUI 侧的编排代码：`internal/hsc/gui.go`（本仓库新增，不属于上游同步范围）
+- 自动答题与 LLM 调用：上游 `go/quiz_solve.go` / `go/quiz_llm.go` / `go/quiz_bank.go`
+- 交卷：上游 `go/quiz.go` 的 `cmdQuizSubmit`；批阅状态：`go/quiz_peek.go`
+- LLM 配置：上游 `go/config_toml.go`（`state/config.toml`）
+- GUI 侧的编排代码：`internal/hsc/gui.go`、`internal/hsc/quiz_auto.go`（本仓库新增，不属于上游同步范围）

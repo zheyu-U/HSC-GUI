@@ -22,6 +22,10 @@ export function ClearDebugLog() {
   return window['go']['main']['App']['ClearDebugLog']();
 }
 
+export function ClearQuizBank() {
+  return window['go']['main']['App']['ClearQuizBank']();
+}
+
 export function CompleteDocs() {
   return window['go']['main']['App']['CompleteDocs']();
 }
@@ -46,12 +50,20 @@ export function GetCourseDetail() {
   return window['go']['main']['App']['GetCourseDetail']();
 }
 
+export function GetQuizBank() {
+  return window['go']['main']['App']['GetQuizBank']();
+}
+
 export function GetQuizOverview() {
   return window['go']['main']['App']['GetQuizOverview']();
 }
 
 export function GetQuizQuestions(arg1) {
   return window['go']['main']['App']['GetQuizQuestions'](arg1);
+}
+
+export function GetQuizSettings() {
+  return window['go']['main']['App']['GetQuizSettings']();
 }
 
 export function ListCourses(arg1) {
@@ -66,8 +78,16 @@ export function Logout(arg1) {
   return window['go']['main']['App']['Logout'](arg1);
 }
 
+export function PeekQuizzes(arg1) {
+  return window['go']['main']['App']['PeekQuizzes'](arg1);
+}
+
 export function RefreshCourse() {
   return window['go']['main']['App']['RefreshCourse']();
+}
+
+export function SaveQuizSettings(arg1) {
+  return window['go']['main']['App']['SaveQuizSettings'](arg1);
 }
 
 export function ScanCourse() {
@@ -86,6 +106,10 @@ export function SessionStatus() {
   return window['go']['main']['App']['SessionStatus']();
 }
 
+export function SolveQuizzes(arg1) {
+  return window['go']['main']['App']['SolveQuizzes'](arg1);
+}
+
 export function StartCaptcha() {
   return window['go']['main']['App']['StartCaptcha']();
 }
@@ -96,4 +120,8 @@ export function StartPlay(arg1, arg2, arg3) {
 
 export function StartQRLogin() {
   return window['go']['main']['App']['StartQRLogin']();
+}
+
+export function SubmitQuizzes(arg1) {
+  return window['go']['main']['App']['SubmitQuizzes'](arg1);
 }
