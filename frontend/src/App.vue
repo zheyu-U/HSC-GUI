@@ -75,6 +75,7 @@ const courseError = ref('')
 const coursePage = ref(1)
 const chapterPage = ref(1)
 const docPage = ref(1)
+const openChapterId = ref('')
 
 const quizOverview = ref(null)
 const quizBusy = ref(false)
@@ -141,17 +142,6 @@ const videosByChapter = computed(() => {
   }
   return map
 })
-const worksByChapter = computed(() => {
-  const map = {}
-  const list = (courseDetail.value && courseDetail.value.works) || []
-  for (const item of list) {
-    if (!map[item.chapterId]) {
-      map[item.chapterId] = []
-    }
-    map[item.chapterId].push(item)
-  }
-  return map
-})
 const unpassedVideos = computed(() => {
   const list = (courseDetail.value && courseDetail.value.videos) || []
   return list.filter((v) => !v.isPassed)
@@ -193,6 +183,19 @@ const quizQuestionTotalPages = computed(() => totalPages(quizQuestions.value.len
 const quizQuestionCurrentPage = computed(() => clampPage(quizQuestionPage.value, quizQuestions.value.length, QUESTION_PAGE_SIZE))
 const pagedQuizQuestions = computed(() => pageItems(quizQuestions.value, quizQuestionPage.value, QUESTION_PAGE_SIZE))
 
+const courseName = computed(() => {
+  if (!hasCourse.value || !courseDetail.value.target) {
+    return ''
+  }
+  return courseDetail.value.target.name || ''
+})
+const courseTeacher = computed(() => {
+  if (!hasCourse.value || !courseDetail.value.target) {
+    return ''
+  }
+  return courseDetail.value.target.teacher || ''
+})
+
 const pageTitle = computed(() => {
   if (page.value === 'login') {
     if (view.value === 'success') {
@@ -202,6 +205,15 @@ const pageTitle = computed(() => {
   }
   if (page.value === 'course') {
     return '课程'
+  }
+  if (page.value === 'coursehome') {
+    return courseName.value || '课程主页'
+  }
+  if (page.value === 'video') {
+    return '视频任务'
+  }
+  if (page.value === 'doc') {
+    return '文档任务'
   }
   if (page.value === 'quiz') {
     return '作业与测验'
@@ -221,8 +233,14 @@ const pageLead = computed(() => {
     }
     return '用企业微信扫码，或账号密码登录。'
   }
-  if (page.value === 'quiz') {
-    return '只读浏览题目，不做自动作答。'
+  if (page.value === 'course') {
+    return '选择一门课程，进入课程主页。'
+  }
+  if (page.value === 'coursehome') {
+    return courseTeacher.value ? '任课教师 ' + courseTeacher.value : '课程结构、视频、文档和作业与测验的入口'
+  }
+  if (page.value === 'video' || page.value === 'doc' || page.value === 'quiz') {
+    return courseName.value
   }
   return ''
 })
@@ -272,9 +290,27 @@ function onKeydown(e) {
   }
 }
 
+const PAGE_PARENT = {
+  coursehome: 'course',
+  video: 'coursehome',
+  doc: 'coursehome',
+  quiz: 'coursehome',
+}
+
+function parentPage(name) {
+  return PAGE_PARENT[name] || 'home'
+}
+
+function goBack() {
+  showPage(parentPage(page.value))
+}
+
 function showPage(name) {
   if (name === 'debug' && !mode.value.debug) {
     return
+  }
+  if ((name === 'coursehome' || name === 'video' || name === 'doc' || name === 'quiz') && !hasCourse.value) {
+    name = loggedIn.value ? 'course' : 'login'
   }
   page.value = name
   closeMenu()
@@ -289,14 +325,9 @@ function showPage(name) {
     if (!courseList.value.length && !courseLoading.value) {
       loadCourses(true)
     }
-    if (!quizOverview.value && !quizBusy.value) {
-      loadQuizOverview()
-    }
   }
-  if (name === 'quiz') {
-    if (!quizOverview.value && !quizBusy.value) {
-      loadQuizOverview()
-    }
+  if (name === 'quiz' && !quizOverview.value && !quizBusy.value) {
+    loadQuizOverview()
   }
   if ((name === 'home' || name === 'debug') && mode.value.debug) {
     refreshDebug()
@@ -309,6 +340,34 @@ function openCourse() {
     return
   }
   showPage('course')
+}
+
+async function openCourseRow(item) {
+  if (!item || courseBusy.value || courseLoading.value || playRunning.value) {
+    return
+  }
+  if (isCurrent(item) && hasCourse.value) {
+    showPage('coursehome')
+    return
+  }
+  await selectCourse(item.index)
+  if (!courseError.value && hasCourse.value) {
+    showPage('coursehome')
+  }
+}
+
+function openVideoPage() {
+  openChapterId.value = ''
+  showPage('video')
+}
+
+function openVideoChapter(ch) {
+  const index = chapters.value.findIndex((item) => item.id === ch.id)
+  if (index >= 0) {
+    chapterPage.value = Math.floor(index / CHAPTER_PAGE_SIZE) + 1
+  }
+  openChapterId.value = ch.id
+  showPage('video')
 }
 
 function stopQrTimer() {
@@ -510,6 +569,15 @@ async function doLogout() {
     courseList.value = []
     courseDetail.value = null
     courseError.value = ''
+    coursePage.value = 1
+    chapterPage.value = 1
+    docPage.value = 1
+    openChapterId.value = ''
+    quizOverview.value = null
+    quizSelected.value = ''
+    quizQuestions.value = []
+    quizListPage.value = 1
+    quizQuestionPage.value = 1
     setNotice(res.message, 'ok')
     await refreshSession()
   } catch (e) {
@@ -557,10 +625,10 @@ async function selectCourse(index) {
     playState.value = emptyPlayState()
     chapterPage.value = 1
     docPage.value = 1
+    openChapterId.value = ''
     quizOverview.value = null
     quizSelected.value = ''
     quizQuestions.value = []
-    setNotice('已切换到课程 ' + (detail.target.name || detail.target.courseId), 'ok')
     await refreshSession()
   } catch (e) {
     courseError.value = friendly(e)
@@ -577,6 +645,7 @@ async function refreshCourse() {
     courseDetail.value = await RefreshCourse()
     chapterPage.value = 1
     docPage.value = 1
+    openChapterId.value = ''
     quizOverview.value = null
     setNotice('课程结构已更新', 'ok')
   } catch (e) {
@@ -827,7 +896,7 @@ onUnmounted(() => {
   <div class="app">
     <header class="topbar">
       <div class="bar-left">
-        <button v-if="page !== 'home'" class="back-btn" @click="showPage('home')">返回</button>
+        <button v-if="page !== 'home'" class="back-btn" @click="goBack()">返回</button>
         <button class="brand" @click="showPage('home')" aria-label="回到首页">
           <span class="wordmark">hsc</span>
           <span class="dim">课程助手</span>
@@ -886,7 +955,7 @@ onUnmounted(() => {
     </main>
 
     <main v-else class="subpage">
-      <header class="page-head">
+      <header class="page-head" :class="{'page-head-center': page === 'coursehome'}">
         <div class="page-head-text">
           <h1 class="page-title">{{ pageTitle }}</h1>
           <p v-if="pageLead" class="page-sub">{{ pageLead }}</p>
@@ -895,20 +964,60 @@ onUnmounted(() => {
           <button @click="loadCourses(true)" :disabled="courseLoading || courseBusy || playRunning">
             {{ courseLoading ? '获取中' : '获取课程列表' }}
           </button>
-          <button v-if="hasCourse" @click="refreshCourse" :disabled="courseBusy || playRunning">
-            {{ courseBusy ? '抓取中' : '抓取课程结构' }}
+        </div>
+        <div v-else-if="page === 'video'" class="actions">
+          <label class="play-speed">
+            倍速
+            <select v-model.number="playSpeed" :disabled="playRunning">
+              <option :value="1">1x</option>
+              <option :value="1.5">1.5x</option>
+              <option :value="2">2x</option>
+              <option :value="3">3x</option>
+            </select>
+          </label>
+          <button class="primary" @click="startPlay('')" :disabled="playRunning || docBusy || !unpassedVideos.length">
+            {{ playRunning ? '播放中' : (unpassedVideos.length ? '播放未完成 ' + unpassedVideos.length + ' 个' : '视频都已完成') }}
+          </button>
+          <button v-if="playRunning" @click="stopPlay">停止播放</button>
+        </div>
+        <div v-else-if="page === 'doc'" class="actions">
+          <button @click="scanDocs" :disabled="docBusy || playRunning">
+            {{ docBusy ? '处理中' : (docScanned ? '重新扫描' : '扫描文档任务') }}
+          </button>
+          <button v-if="docScanned && docUnpassed" class="primary" @click="completeDocs" :disabled="docBusy || playRunning">
+            完成未完成文档 {{ docUnpassed }} 个
           </button>
         </div>
         <div v-else-if="page === 'quiz'" class="actions">
           <button @click="dumpQuizzes" :disabled="quizBusy || playRunning || !quizOverview || !quizOverview.scanned">抓取题目</button>
           <button @click="loadQuizOverview" :disabled="quizBusy">刷新列表</button>
-          <button @click="showPage('course')">返回课程</button>
         </div>
         <div v-else-if="page === 'debug' && mode.debug" class="actions">
           <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
           <button @click="clearDebug">清空日志</button>
         </div>
       </header>
+
+      <div v-if="page === 'coursehome' && hasCourse" class="entry-list">
+        <button class="entry-row" @click="openVideoPage">
+          <span class="entry-main">
+            <span class="entry-name">视频任务</span>
+            <span class="hint">已完成 {{ courseDetail.summary.videosPassed }}/{{ courseDetail.summary.videos }} 个</span>
+          </span>
+        </button>
+        <button class="entry-row" @click="showPage('doc')">
+          <span class="entry-main">
+            <span class="entry-name">文档任务</span>
+            <span class="hint">{{ docScanned ? '已完成 ' + docPassed + '/' + docs.length + ' 个' : '未扫描' }}</span>
+          </span>
+        </button>
+        <button class="entry-row" @click="showPage('quiz')">
+          <span class="entry-main">
+            <span class="entry-name">作业与测验</span>
+            <span class="hint">{{ courseDetail.summary.works }} 个任务点</span>
+          </span>
+        </button>
+      </div>
 
       <section class="panel">
         <template v-if="page === 'login'">
@@ -981,8 +1090,8 @@ onUnmounted(() => {
         </template>
 
         <template v-else-if="page === 'course'">
-          <p v-if="courseDetail" class="hint">{{ courseDetail.message }}</p>
           <p v-if="courseError" class="inline-error">{{ courseError }}</p>
+          <p v-if="!courseList.length && !courseLoading" class="hint">还没有课程列表，点右上角“获取课程列表”。</p>
 
           <div v-if="courseList.length" class="course-list">
             <div v-for="item in pagedCourses" :key="item.courseId" class="course-row">
@@ -990,7 +1099,9 @@ onUnmounted(() => {
               <span class="course-name">{{ item.name || '未命名课程' }}</span>
               <span class="course-teacher">{{ item.teacher }}</span>
               <span v-if="isCurrent(item)" class="course-current">当前</span>
-              <button @click="selectCourse(item.index)" :disabled="courseBusy || courseLoading || playRunning">选择</button>
+              <button @click="openCourseRow(item)" :disabled="courseBusy || courseLoading || playRunning">
+                {{ isCurrent(item) ? '打开' : '进入' }}
+              </button>
             </div>
           </div>
           <div v-if="courseTotalPages > 1" class="pager actions">
@@ -999,34 +1110,58 @@ onUnmounted(() => {
             <button :disabled="courseCurrentPage >= courseTotalPages" @click="coursePage = courseCurrentPage + 1">下一页</button>
           </div>
 
+          <p class="hint">进入课程后可以看视频任务、文档任务和作业与测验；课程结构在课程主页里。</p>
+        </template>
+
+        <template v-else-if="page === 'coursehome'">
+          <p v-if="courseError" class="inline-error">{{ courseError }}</p>
+
           <template v-if="hasCourse">
             <div class="course-summary">
               <span>章节 <b>{{ courseDetail.summary.chapters }}</b></span>
-              <span>视频 <b>{{ courseDetail.summary.videosPassed }}/{{ courseDetail.summary.videos }}</b></span>
-              <span>作业 <b>{{ courseDetail.summary.works }}</b></span>
-              <span v-if="courseDetail.summary.docs">文档 <b>{{ courseDetail.summary.docsPassed }}/{{ courseDetail.summary.docs }}</b></span>
               <span>总时长 <b>{{ courseDetail.summary.durationHours }}</b> 小时</span>
               <span v-if="courseDetail.summary.speedLimited">限 1 倍速 <b>{{ courseDetail.summary.speedLimited }}</b> 个</span>
-              <span v-if="courseDetail.stale" class="warn-text">缓存属于另一门课</span>
             </div>
 
-            <div class="play-bar">
-              <div class="play-controls actions">
-                <label class="play-speed">
-                  倍速
-                  <select v-model.number="playSpeed" :disabled="playRunning">
-                    <option :value="1">1x</option>
-                    <option :value="1.5">1.5x</option>
-                    <option :value="2">2x</option>
-                    <option :value="3">3x</option>
-                  </select>
-                </label>
-                <button class="primary" @click="startPlay('')" :disabled="playRunning || docBusy || !unpassedVideos.length">
-                  {{ playRunning ? '播放中' : (unpassedVideos.length ? '播放未完成 ' + unpassedVideos.length + ' 个' : '视频都已完成') }}
+            <div class="section-head">
+              <h3 class="section-title">课程结构</h3>
+              <div class="actions">
+                <button @click="refreshCourse" :disabled="courseBusy || playRunning">
+                  {{ courseBusy ? '抓取中' : '抓取课程结构' }}
                 </button>
-                <button v-if="playRunning" @click="stopPlay">停止播放</button>
-                <span class="hint">限 1 倍速的任务点会按 1 倍播放</span>
               </div>
+            </div>
+            <p v-if="chapters.length" class="hint">共 {{ chapters.length }} 章，点章节看这一章的视频任务。</p>
+            <p v-else class="hint">还没有章节结构，点右上角“抓取课程结构”。</p>
+            <div v-if="chapters.length" class="chapter-list">
+              <button v-for="ch in pagedChapters" :key="ch.id" class="chapter-row" @click="openVideoChapter(ch)">
+                <span class="chapter-name">{{ ch.title || ('章节 ' + ch.index) }}</span>
+                <span class="hint">视频 {{ ch.videosPassed }}/{{ ch.videos }}</span>
+                <span class="hint">作业 {{ ch.works }}</span>
+                <span class="entry-go">看视频</span>
+              </button>
+            </div>
+            <div v-if="chapterTotalPages > 1" class="pager actions">
+              <button :disabled="chapterCurrentPage <= 1" @click="chapterPage = chapterCurrentPage - 1">上一页</button>
+              <span class="hint">第 {{ chapterCurrentPage }} / {{ chapterTotalPages }} 页，共 {{ chapters.length }} 章</span>
+              <button :disabled="chapterCurrentPage >= chapterTotalPages" @click="chapterPage = chapterCurrentPage + 1">下一页</button>
+            </div>
+            <p v-if="courseDetail.stale" class="warn-text">缓存属于另一门课，点右上角“抓取课程结构”刷新。</p>
+          </template>
+
+          <template v-else>
+            <p class="hint">还没有选择课程。</p>
+            <div class="actions">
+              <button @click="showPage('course')">去课程列表</button>
+            </div>
+          </template>
+        </template>
+
+        <template v-else-if="page === 'video'">
+          <p v-if="courseError" class="inline-error">{{ courseError }}</p>
+
+          <template v-if="hasCourse">
+            <div class="play-status-block">
               <div v-if="playState.message" class="play-status">
                 <div class="play-line">
                   <span class="play-message">{{ playState.message }}</span>
@@ -1038,13 +1173,14 @@ onUnmounted(() => {
                   <div class="play-fill" :style="{width: Math.min(100, playState.percent || 0) + '%'}"></div>
                 </div>
               </div>
+              <p v-else class="hint">选择下面的视频开始播放。限 1 倍速的任务点会自动按 1 倍播放。</p>
             </div>
 
-            <div class="chapter-list">
-              <details v-for="ch in pagedChapters" :key="ch.id" class="chapter" :open="ch.index <= 2">
+            <div v-if="chapters.length" class="chapter-list">
+              <details v-for="ch in pagedChapters" :key="ch.id" class="chapter" :open="ch.index <= 2 || openChapterId === ch.id">
                 <summary>
                   <span class="chapter-name">{{ ch.title || ('章节 ' + ch.index) }}</span>
-                  <span class="hint">视频 {{ ch.videosPassed }}/{{ ch.videos }}，作业 {{ ch.works }}</span>
+                  <span class="hint">视频 {{ ch.videosPassed }}/{{ ch.videos }}</span>
                 </summary>
                 <ul class="task-list">
                   <li v-for="(v, index) in videosByChapter[ch.id] || []" :key="'v' + ch.id + index" :class="{playing: playRunning && playState.objectId === v.objectId}">
@@ -1056,61 +1192,42 @@ onUnmounted(() => {
                     <span v-if="v.speedLimited" class="hint">限 1 倍速</span>
                     <button v-if="!v.isPassed" class="row-play" @click="startPlay(v.objectId)" :disabled="playRunning || docBusy">播放</button>
                   </li>
-                  <li v-for="(w, index) in worksByChapter[ch.id] || []" :key="'w' + ch.id + index">
-                    <span class="task-tag">作业</span>
-                    <span class="task-title">{{ w.title || '未命名作业' }}</span>
-                  </li>
-                  <li v-if="!((videosByChapter[ch.id] || []).length || (worksByChapter[ch.id] || []).length)" class="hint">
-                    本章没有可展示的任务点
-                  </li>
+                  <li v-if="!(videosByChapter[ch.id] || []).length" class="hint">本章没有视频任务点。</li>
                 </ul>
               </details>
             </div>
+            <p v-else class="hint">还没有课程结构，回课程主页点“抓取课程结构”。</p>
             <div v-if="chapterTotalPages > 1" class="pager actions">
               <button :disabled="chapterCurrentPage <= 1" @click="chapterPage = chapterCurrentPage - 1">上一页</button>
               <span class="hint">第 {{ chapterCurrentPage }} / {{ chapterTotalPages }} 页，共 {{ chapters.length }} 章</span>
               <button :disabled="chapterCurrentPage >= chapterTotalPages" @click="chapterPage = chapterCurrentPage + 1">下一页</button>
             </div>
+          </template>
+        </template>
 
-            <details class="doc-section" open>
-              <summary>
-                <span class="chapter-name">文档任务</span>
-                <span class="hint" v-if="docScanned">已完成 {{ docPassed }}/{{ docs.length }}</span>
-                <span class="hint" v-else>未扫描</span>
-              </summary>
-              <div class="doc-actions actions">
-                <button @click="scanDocs" :disabled="docBusy || playRunning">
-                  {{ docBusy ? '处理中' : (docScanned ? '重新扫描' : '扫描文档任务') }}
-                </button>
-                <button v-if="docScanned && docUnpassed" class="primary" @click="completeDocs" :disabled="docBusy || playRunning">
-                  完成未完成的文档 {{ docUnpassed }} 个
-                </button>
-                <span class="hint" v-if="!docScanned">扫描会逐章读取附件，可能需要十几秒</span>
-              </div>
-              <p v-if="docScanned && !docs.length" class="hint">这门课没有文档任务点。</p>
-              <ul v-if="docs.length" class="task-list doc-list">
-                <li v-for="(d, index) in pagedDocs" :key="'d' + d.chapterId + index">
-                  <span class="task-tag">文档</span>
-                  <span class="task-title">{{ d.title || '未命名文档' }}</span>
-                  <span v-if="d.chapterIndex" class="hint">第 {{ d.chapterIndex }} 章</span>
-                  <span v-if="d.isPassed" class="ok-text">已完成</span>
-                  <span v-else class="hint">未完成</span>
-                </li>
-              </ul>
-              <div v-if="docTotalPages > 1" class="pager actions">
-                <button :disabled="docCurrentPage <= 1" @click="docPage = docCurrentPage - 1">上一页</button>
-                <span class="hint">第 {{ docCurrentPage }} / {{ docTotalPages }} 页，共 {{ docs.length }} 个</span>
-                <button :disabled="docCurrentPage >= docTotalPages" @click="docPage = docCurrentPage + 1">下一页</button>
-              </div>
-            </details>
+        <template v-else-if="page === 'doc'">
+          <p v-if="courseError" class="inline-error">{{ courseError }}</p>
 
-            <div class="quiz-entry">
-              <div class="quiz-entry-text">
-                <span class="chapter-name">作业与测验</span>
-                <span class="hint">{{ quizOverview && quizOverview.scanned ? quizItems.length : courseDetail.summary.works }} 个任务点，可查看已抓取的题目</span>
-              </div>
-              <button @click="showPage('quiz')">查看</button>
+          <template v-if="hasCourse">
+            <p v-if="docScanned" class="hint">已完成 {{ docPassed }}/{{ docs.length }} 个文档任务。</p>
+            <p v-else class="hint">还没有扫描文档任务。点右上角“扫描文档任务”，需要十几秒。</p>
+            <p v-if="docScanned && !docs.length" class="hint">这门课没有文档任务点。</p>
+
+            <ul v-if="docs.length" class="task-list doc-list">
+              <li v-for="(d, index) in pagedDocs" :key="'d' + d.chapterId + index">
+                <span class="task-tag">文档</span>
+                <span class="task-title">{{ d.title || '未命名文档' }}</span>
+                <span v-if="d.chapterIndex" class="hint">第 {{ d.chapterIndex }} 章</span>
+                <span v-if="d.isPassed" class="ok-text">已完成</span>
+                <span v-else class="hint">未完成</span>
+              </li>
+            </ul>
+            <div v-if="docTotalPages > 1" class="pager actions">
+              <button :disabled="docCurrentPage <= 1" @click="docPage = docCurrentPage - 1">上一页</button>
+              <span class="hint">第 {{ docCurrentPage }} / {{ docTotalPages }} 页，共 {{ docs.length }} 个</span>
+              <button :disabled="docCurrentPage >= docTotalPages" @click="docPage = docCurrentPage + 1">下一页</button>
             </div>
+            <p class="hint">扫描会逐章读取附件；完成后会重新扫描刷新状态。</p>
           </template>
         </template>
 
@@ -1528,12 +1645,23 @@ onUnmounted(() => {
   margin: 0 0 20px;
 }
 
+.page-head-center {
+  justify-content: center;
+  text-align: center;
+  margin-bottom: 120px;
+}
+
+.page-head-center .page-title {
+  font-size: 40px;
+}
+
 .page-title {
   margin: 0;
   font-size: 32px;
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
 }
 
 .page-sub {
@@ -1810,6 +1938,123 @@ button.primary:disabled {
   font-weight: 600;
 }
 
+/* 课程主页入口 */
+.entry-list {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  width: 100%;
+  max-width: 560px;
+  margin: 0 auto 120px;
+}
+
+.entry-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 104px;
+  width: 100%;
+  padding: 16px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-lg);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  color: var(--text);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.entry-row:hover {
+  background: var(--surface-2);
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.entry-row:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.entry-main {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.entry-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.entry-main .hint {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.entry-go {
+  flex: none;
+  color: var(--link);
+  font-size: 13px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 20px 0 8px;
+}
+
+.section-head .section-title {
+  margin: 0;
+}
+
+.chapter-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chapter-row:hover {
+  background: var(--surface-2);
+}
+
+.chapter-row:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
+.chapter-row .chapter-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.chapter-row .hint {
+  margin: 0;
+}
+
+.chapter-row .entry-go {
+  font-size: 12px;
+}
+
 .chapter-list {
   display: flex;
   flex-direction: column;
@@ -1876,12 +2121,8 @@ button.primary:disabled {
 }
 
 /* 播放 */
-.play-bar {
-  margin: 12px 0 10px;
-  padding: 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-md);
-  background: var(--surface-2);
+.play-status-block {
+  margin: 0 0 12px;
 }
 
 .play-speed {
@@ -1902,12 +2143,8 @@ button.primary:disabled {
   font-size: 13px;
 }
 
-.play-controls .hint {
-  margin: 0;
-}
-
 .play-status {
-  margin-top: 10px;
+  margin-top: 0;
 }
 
 .play-line {
@@ -1969,28 +2206,6 @@ button.primary:disabled {
 }
 
 /* 文档任务 */
-.doc-section {
-  margin-top: 10px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-md);
-  padding: 8px 12px;
-}
-
-.doc-section summary {
-  cursor: pointer;
-  display: flex;
-  gap: 12px;
-  align-items: baseline;
-}
-
-.doc-actions {
-  margin: 10px 0 4px;
-}
-
-.doc-actions .hint {
-  margin: 0;
-}
-
 .doc-list {
   max-height: none;
 }
@@ -2002,42 +2217,6 @@ button.primary:disabled {
 
 .pager .hint {
   margin: 0;
-}
-
-/* 作业与测验入口 */
-.quiz-entry {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 10px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-md);
-  padding: 8px 12px;
-}
-
-.quiz-entry-text {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  min-width: 0;
-  flex-wrap: wrap;
-}
-
-.quiz-entry button {
-  flex: none;
-  height: 28px;
-  padding: 0 12px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius-pill);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.quiz-entry button:hover {
-  background: var(--surface-2);
 }
 
 /* 作业与测验列表 */
@@ -2273,10 +2452,25 @@ button.primary:disabled {
   .page-title {
     font-size: 28px;
   }
+
+  .page-head-center .page-title {
+    font-size: 32px;
+  }
+}
+
+@media (max-width: 560px) {
+  .entry-list {
+    grid-template-columns: 1fr;
+  }
+
+  .entry-row {
+    min-height: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .card {
+  .card,
+  .entry-row {
     transition: none;
   }
 }
