@@ -2493,7 +2493,7 @@ onUnmounted(() => {
               <button @click="loadQuizBank" :disabled="quizSettingsBusy">刷新</button>
               <button @click="clearQuizBank" :disabled="quizSettingsBusy">清空题库</button>
             </div>
-            <p class="hint">设置保存在 state/config.toml，与 hsc 命令行共用。</p>
+            <p class="hint">设置保存在 state/config.toml，与 hust-smartcourse 命令行共用。</p>
           </template>
         </template>
 
@@ -2561,10 +2561,10 @@ onUnmounted(() => {
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
           </button>
           <h2 id="about-title" class="about-title">hsc 课程助手</h2>
-          <p class="about-desc">课程、视频、文档与测验任务的桌面助手，登录态和课程缓存与 hsc 命令行共用。</p>
+          <p class="about-desc"><span class="nowrap">hust-smartcourse</span> 的桌面图形界面：课程、视频、文档与测验任务都能在这里完成，登录态和课程缓存与命令行共用。</p>
           <dl class="facts">
             <div><dt>版本</dt><dd>{{ mode.version }}（{{ mode.mode }}）</dd></div>
-            <div><dt>登录态</dt><dd>与 hsc 命令行共用，保存在 state 目录</dd></div>
+            <div><dt>登录态</dt><dd>与 <span class="nowrap">hust-smartcourse</span> 命令行共用，保存在 state 目录</dd></div>
             <div><dt>数据</dt><dd>登录信息只保存在本机，不上传账号</dd></div>
             <div v-if="mode.debug"><dt>state 目录</dt><dd class="mono">{{ session ? session.stateDir : '—' }}</dd></div>
           </dl>
@@ -2605,7 +2605,7 @@ onUnmounted(() => {
             <section>
               <h3>常见问题</h3>
               <p>登录态失效时回登录页重新登录，课程与题目缓存会保留。</p>
-              <p>数据都在 state 目录，和 hsc 命令行共用；debug 构建的调试页能看到具体路径。</p>
+              <p>数据都在 state 目录，和 hust-smartcourse 命令行共用；debug 构建的调试页能看到具体路径。</p>
               <p>系统通知不可用时，播放完成不会弹通知，结果仍会显示在页面和消息条里。</p>
             </section>
           </div>
@@ -3490,7 +3490,13 @@ button.primary:disabled {
 .facts dd {
   margin: 0;
   min-width: 0;
-  word-break: break-all;
+  /* 路径要能断，普通单词不断：只用 anywhere 兜底，不要 break-all */
+  word-break: normal;
+  overflow-wrap: anywhere;
+}
+
+.nowrap {
+  white-space: nowrap;
 }
 
 .course-list {

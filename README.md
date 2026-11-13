@@ -1,12 +1,13 @@
 # hsc 课程助手（GUI）
 
-[hust-smartcourse-cli](https://github.com/xcdoge/hust-smartcourse-cli) 的 Windows 图形界面。
-刷课、文档任务、作业测验和自动答题都收进一个单文件 exe，不用记命令行参数，也不用手动拼链接。
+hsc 课程助手是 [hust-smartcourse-cli](https://github.com/xcdoge/hust-smartcourse-cli)
+的 Windows 图形界面。刷课、文档任务、作业测验和自动答题都收进一个单文件 exe，
+不用记命令行参数，也不用手动拼链接。
 
 - 产物：`hsc-gui.exe`，单文件（约 13 MB），前端资源打包在内，不需要另外装运行时
 - 平台：Windows 10 / 11（依赖系统自带的 WebView2）
 - 当前版本：**1.0.0-beta**
-- 和 CLI 共用同一份 `state/`：CLI 登录过，GUI 直接能用，反过来也一样
+- 和 hust-smartcourse-cli 共用同一份 `state/`：命令行登录过，GUI 直接能用，反过来也一样
 
 ## 界面
 
@@ -106,7 +107,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\sync-upstream.ps
 本仓库只做编排和展示，不 fork 业务逻辑：协议细节（CAS 登录、播放签名、交卷端点、限速判断）
 全部留在上游代码里，以功能白名单的方式 vendor 到 `internal/hsc/`，GUI 适配集中在
 `internal/hsc/gui.go` 等新文件。上游更新后重跑同步脚本，适配文件不受影响。
-`state/` 布局、加密凭据格式与 CLI 完全一致。
+`state/` 布局、加密凭据格式与 hust-smartcourse 命令行完全一致。
 
 工程约定、页面结构、构建与提交规范都写在 [AGENTS.md](AGENTS.md)，
 前后端绑定清单在 [docs/api.md](docs/api.md)。
