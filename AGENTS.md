@@ -282,6 +282,11 @@ go test ./internal/hsc -run TestCredentialInteropWithCLI -v
 注意：`scripts/*.ps1` 必须保存为 **UTF-8 带 BOM**，否则 Windows PowerShell 5.1
 会按 ANSI 解析中文注释而报语法错误；本机没有 PowerShell 7（`pwsh`）。
 
+GitHub 走本机代理 `http://127.0.0.1:7897`：仓库里已配
+`http.https://github.com/.proxy` 与 `http.https://codeload.github.com/.proxy`，
+`git push/pull` 与上游 tarball 下载都走这个口。代理没开时 GitHub 相关操作会直接失败，
+先让代理起来再重试，不要改用直连或换其他镜像。
+
 ## 边界（沿用上游）
 
 不加：绕过平台风控的新手段、批量账号操作、把答案分享出去的功能。
