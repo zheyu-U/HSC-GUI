@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	goruntime "runtime"
 	"sync"
 	"time"
@@ -13,7 +14,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-const appVersion = "0.9.1"
+const appVersion = "1.0.0-beta"
 
 // App 是暴露给前端的绑定对象，方法清单同步维护在 docs/api.md。
 type App struct {
@@ -41,6 +42,7 @@ type DebugInfo struct {
 	Arch        string `json:"arch"`
 	CookieCount int    `json:"cookieCount"`
 	LoggedIn    bool   `json:"loggedIn"`
+	LogPath     string `json:"logPath"`
 }
 
 // DebugEntry 一条调试日志。
@@ -52,7 +54,14 @@ type DebugEntry struct {
 
 // NewApp 创建 App。
 func NewApp() *App {
-	return &App{}
+	a := &App{}
+	if debugBuild {
+		// debug 构建把播放上报明细写进调试日志，方便排查“多次上报仍未通过”
+		hsc.SetPlayTrace(func(msg string) {
+			a.record("播放", msg)
+		})
+	}
+	return a
 }
 
 // startup 在窗口创建前调用，负责确定 state 目录（与 CLI 同一份）。
@@ -63,24 +72,46 @@ func (a *App) startup(ctx context.Context) {
 		fmt.Println("初始化 state 目录失败:", err)
 		return
 	}
+	mode := "release"
+	if debugBuild {
+		mode = "debug"
+	}
+	a.record("启动", fmt.Sprintf("hsc-gui %s（%s）", appVersion, mode))
 	a.record("启动", "state 目录: "+hsc.StateDir())
+	if exe, err := os.Executable(); err == nil {
+		a.record("启动", "exe: "+exe)
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		a.record("启动", "cwd: "+cwd)
+	}
+	a.record("启动", fmt.Sprintf("go %s %s/%s", goruntime.Version(), goruntime.GOOS, goruntime.GOARCH))
+	if s, err := hsc.SessionStatus(); err == nil {
+		a.record("启动", fmt.Sprintf("登录态: %v，账号尾号: %s，cookie: %d，已保存凭据: %v",
+			s.LoggedIn, s.AccountTail, s.CookieCount, s.CredSaved))
+	}
+	if path := debugLogPath(); path != "" {
+		a.record("启动", "调试日志: "+path)
+	}
 }
 
 // record 只在 debug 构建里记录调试日志，release 不占内存也不暴露内部信息。
+// debug 构建同时追加到 state/logs/gui-debug-YYYYMMDD.log，方便事后对着账号排查。
 func (a *App) record(kind, message string) {
 	if !debugBuild {
 		return
 	}
+	now := time.Now()
 	a.debugMu.Lock()
-	defer a.debugMu.Unlock()
 	a.debugLog = append(a.debugLog, DebugEntry{
-		Time:    time.Now().Format("15:04:05"),
+		Time:    now.Format("15:04:05"),
 		Kind:    kind,
 		Message: message,
 	})
 	if len(a.debugLog) > 300 {
 		a.debugLog = a.debugLog[len(a.debugLog)-300:]
 	}
+	a.debugMu.Unlock()
+	a.writeDebugFile(now, kind, message)
 }
 
 // AppMode 返回当前构建模式与版本，前端据此决定显示 release 还是 debug 界面。
@@ -104,6 +135,7 @@ func (a *App) DebugInfo() (DebugInfo, error) {
 		GoVersion: goruntime.Version(),
 		OS:        goruntime.GOOS,
 		Arch:      goruntime.GOARCH,
+		LogPath:   debugLogPath(),
 	}
 	if cwd, err := os.Getwd(); err == nil {
 		info.Cwd = cwd
@@ -140,6 +172,27 @@ func (a *App) ClearDebugLog() {
 	a.debugMu.Unlock()
 }
 
+// OpenDebugLog 在资源管理器里定位今天的调试日志文件，仅 debug 构建使用。
+func (a *App) OpenDebugLog() error {
+	if !debugBuild {
+		return fmt.Errorf("release 构建不提供调试日志")
+	}
+	path := debugLogPath()
+	if path == "" {
+		return fmt.Errorf("state 目录还没准备好，暂时没有日志文件")
+	}
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("今天还没有日志文件，先操作一下再打开")
+	}
+	if goruntime.GOOS != "windows" {
+		return fmt.Errorf("打开日志目录只支持 Windows")
+	}
+	if err := exec.Command("explorer.exe", "/select,"+path).Start(); err != nil {
+		return fmt.Errorf("打开资源管理器失败: %w", err)
+	}
+	return nil
+}
+
 // StartQRLogin 生成二维码并开始后台轮询，进度经 login:qr 事件推送。
 func (a *App) StartQRLogin() (hsc.QRLoginResult, error) {
 	a.record("调用", "StartQRLogin")
@@ -169,8 +222,8 @@ func (a *App) StartCaptcha() (hsc.CaptchaView, error) {
 		a.record("错误", "StartCaptcha: "+err.Error())
 		return res, err
 	}
-	a.record("结果", fmt.Sprintf("验证码已识别: 建议 %s，置信度 %.2f，字符数 %d",
-		res.SuggestedCode, res.Confidence, res.Count))
+	a.record("结果", fmt.Sprintf("验证码已识别: 置信度 %.2f，字符数 %d",
+		res.Confidence, res.Count))
 	return res, nil
 }
 
@@ -314,21 +367,24 @@ func (a *App) ScanCourse() (hsc.CourseDetail, error) {
 }
 
 // CompleteDocs 完成未完成的文档任务，完成后重新扫描刷新状态。
-func (a *App) CompleteDocs() (hsc.CourseDetail, error) {
+func (a *App) CompleteDocs() (hsc.CompleteDocsResult, error) {
 	a.record("调用", "CompleteDocs")
-	detail, err := hsc.CompleteDocs()
+	res, err := hsc.CompleteDocs()
 	if err != nil {
 		a.record("错误", "CompleteDocs: "+err.Error())
-		return detail, err
+		return res, err
 	}
-	a.record("结果", fmt.Sprintf("文档任务 %d 个，已完成 %d 个", detail.Summary.Docs, detail.Summary.DocsPassed))
-	return detail, nil
+	a.record("结果", fmt.Sprintf("完成文档：服务器确认 %d，跳过 %d，失败 %d（%s）",
+		res.Done, res.Skipped, res.Failed, res.Message))
+	return res, nil
 }
 
-// StartPlay 后台播放视频任务点，limit 大于 0 时最多处理这么多个，进度经 play:progress 事件推送。
-func (a *App) StartPlay(objectID string, speed float64, limit int) (hsc.PlayStartResult, error) {
-	a.record("调用", fmt.Sprintf("StartPlay objectId=%q speed=%g limit=%d", objectID, speed, limit))
-	res, err := hsc.StartPlay(objectID, speed, limit, func(ev hsc.PlayEvent) {
+// StartPlay 后台播放视频任务点，limit 大于 0 时最多处理这么多个，
+// tickSec 是上报间隔秒数，allowLimited 为 true 时忽略限速标记；进度经 play:progress 事件推送。
+func (a *App) StartPlay(objectID string, speed float64, limit int, tickSec float64, allowLimited bool) (hsc.PlayStartResult, error) {
+	a.record("调用", fmt.Sprintf("StartPlay objectId=%q speed=%g limit=%d tick=%gs allowLimited=%v",
+		objectID, speed, limit, tickSec, allowLimited))
+	res, err := hsc.StartPlay(objectID, speed, limit, tickSec, allowLimited, func(ev hsc.PlayEvent) {
 		if ev.State != "progress" {
 			a.record("事件", "play "+ev.State+" "+ev.Message)
 		}

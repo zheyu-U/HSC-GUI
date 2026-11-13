@@ -31,6 +31,57 @@ func writeTestJSON(t *testing.T, name string, v any) {
 	}
 }
 
+// 服务器确认全部完成后，本地把文档行标记成已完成（只动文档行，不动视频）。
+func TestMarkDocRowsPassed(t *testing.T) {
+	scan := &ScanResult{Rows: []ScanRow{
+		{Module: "insertdoc", Type: "document", IsPassed: false},
+		{Module: "insertdoc", Type: "document", IsPassed: true},
+		{Module: "insertvideo", Type: "video", IsPassed: false},
+	}}
+	if marked := markDocRowsPassed(scan); marked != 1 {
+		t.Fatalf("应只标记 1 个未完成文档，got %d", marked)
+	}
+	if !scan.Rows[0].IsPassed || !scan.Rows[1].IsPassed {
+		t.Fatal("文档行应全部标记为已完成")
+	}
+	if scan.Rows[2].IsPassed {
+		t.Fatal("视频行不应该被标记")
+	}
+}
+
+// 上游 cmdDoc 只把“完成 X，跳过 Y，失败 Z”写进 gcli.log，界面按这行给结果。
+func TestParseDocLog(t *testing.T) {
+	text := "ok 123.pdf\n完成 3，跳过 1，失败 0\n章节 53 个\n"
+	done, skipped, failed, ok := parseDocLog(text)
+	if !ok || done != 3 || skipped != 1 || failed != 0 {
+		t.Fatalf("解析结果不对: ok=%v done=%d skipped=%d failed=%d", ok, done, skipped, failed)
+	}
+
+	if _, _, _, ok := parseDocLog("没有统计行"); ok {
+		t.Fatal("没有统计行时应返回 ok=false")
+	}
+
+	// 多次运行取最后一次
+	if done, _, _, _ := parseDocLog("完成 1，跳过 0，失败 0\n完成 9，跳过 0，失败 2\n"); done != 9 {
+		t.Fatalf("应取最后一次统计，got done=%d", done)
+	}
+}
+
+// 播放上报的调试回调：设了就转发，没设（release）静默不 panic。
+func TestPlayTraceHook(t *testing.T) {
+	var got []string
+	SetPlayTrace(func(msg string) { got = append(got, msg) })
+	defer SetPlayTrace(nil)
+
+	tracePlay("上报 %s played=%d", "v1", 12)
+	if len(got) != 1 || got[0] != "上报 v1 played=12" {
+		t.Fatalf("回调内容不对: %#v", got)
+	}
+
+	SetPlayTrace(nil)
+	tracePlay("没设回调时不能 panic")
+}
+
 func TestBuildCourseDetailWithDocs(t *testing.T) {
 	useTempState(t)
 

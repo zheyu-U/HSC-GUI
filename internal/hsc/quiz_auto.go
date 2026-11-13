@@ -42,6 +42,32 @@ var quizAllowedTypes = []string{"choice", "multi", "judge", "fill", "essay"}
 // quizDefaultTypes 与上游 config_toml.go 的默认 types 一致。
 var quizDefaultTypes = []string{"choice", "multi", "judge", "fill"}
 
+// GUI 默认接 DeepSeek。上游 config_toml.go 的默认值仍是 OpenAI；这里只在
+// “还没配过”（未启用、没填 Key、还是 OpenAI 默认地址和模型）时替换设置页显示值，
+// 不改上游文件，也不覆盖用户已经填过的地址/模型。
+const (
+	guiDefaultLLMBaseURL = "https://api.deepseek.com/v1"
+	// DeepSeek 2026-07 起把 deepseek-chat 换成了 V4 系列名字：通用用 deepseek-flash，
+	// 更强的是 deepseek-v4-pro；旧名字已下线，不要再写 deepseek-chat。
+	guiDefaultLLMModel = "deepseek-flash"
+)
+
+// guiLLMDefaults 返回设置页该显示的接口地址与模型。
+func guiLLMDefaults(cfg *Config) (string, string) {
+	base := strings.TrimSpace(cfg.LLM.BaseURL)
+	model := strings.TrimSpace(cfg.LLM.Model)
+	if cfg.LLM.Enabled || strings.TrimSpace(cfg.LLM.APIKey) != "" {
+		return base, model
+	}
+	if base == "" || base == "https://api.openai.com/v1" {
+		base = guiDefaultLLMBaseURL
+	}
+	if model == "" || model == "gpt-4o-mini" || model == "deepseek-chat" {
+		model = guiDefaultLLMModel
+	}
+	return base, model
+}
+
 // GetQuizSettings 读取 state/config.toml；文件缺失时按上游默认值生成。
 func GetQuizSettings() (QuizSettings, error) {
 	if err := InitState(); err != nil {
@@ -56,12 +82,13 @@ func getQuizSettings() (QuizSettings, error) {
 	if err != nil {
 		return QuizSettings{}, fmt.Errorf("读取 state/config.toml 失败: %w", err)
 	}
+	baseURL, model := guiLLMDefaults(cfg)
 	out := QuizSettings{
 		Enabled:        cfg.LLM.Enabled,
-		BaseURL:        cfg.LLM.BaseURL,
+		BaseURL:        baseURL,
 		APIKeyMasked:   maskKey(cfg.LLM.APIKey),
 		APIKey:         "",
-		Model:          cfg.LLM.Model,
+		Model:          model,
 		Temperature:    cfg.LLM.Temperature,
 		MaxTokens:      cfg.LLM.MaxTokens,
 		TimeoutSeconds: cfg.LLM.TimeoutSeconds,

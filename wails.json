@@ -9,5 +9,12 @@
   "author": {
     "name": "zheyu-U",
     "email": "140892404+zheyu-U@users.noreply.github.com"
+  },
+  "info": {
+    "companyName": "hsc-GUI",
+    "productName": "hsc 课程助手",
+    "productVersion": "1.0.0.0",
+    "copyright": "Copyright 2026 zheyu-U",
+    "comments": "hust-smartcourse-cli 的图形界面，1.0.0-beta"
   }
 }

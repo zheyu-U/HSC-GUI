@@ -14,6 +14,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -877,19 +879,48 @@ var (
 	playRunning bool
 )
 
+// playTrace 由 GUI 在 debug 构建里注入（见 SetPlayTrace），用来把每次上报的
+// played/duration/passed 写进调试日志，排查“多次上报仍未通过”；release 为 nil。
+var playTrace func(string)
+
+// SetPlayTrace 设置播放上报的调试回调；GUI 只在 debug 构建里调用。
+func SetPlayTrace(fn func(string)) {
+	playTrace = fn
+}
+
+func tracePlay(format string, args ...any) {
+	if playTrace == nil {
+		return
+	}
+	playTrace(fmt.Sprintf(format, args...))
+}
+
 // errPlayCancelled 播放被用户停止时返回；只在 gui.go 里流转，不会展示成错误。
 var errPlayCancelled = errors.New("已停止播放")
 
 // StartPlay 后台播放视频任务点：objectID 为空时播放全部未完成的任务点，
-// speed 为倍速，limit 大于 0 时最多处理这么多个（objectID 模式忽略 limit），
-// 限 1 倍速的任务点会自动降回 1 倍。
+// speed 为倍速（1–25），tickSec 为两次上报之间的真实间隔秒数（1–30，默认 10），
+// limit 大于 0 时最多处理这么多个（objectID 模式忽略 limit）。
+// allowLimited 为 true 时限 1 倍速的任务点也按 speed 播放（默认 false，强制 1 倍）。
 // 进度通过 onEvent 推送；通过一个就把状态写回 course.json，CLI 与 GUI 都能读到。
-func StartPlay(objectID string, speed float64, limit int, onEvent func(PlayEvent)) (PlayStartResult, error) {
+func StartPlay(objectID string, speed float64, limit int, tickSec float64, allowLimited bool, onEvent func(PlayEvent)) (PlayStartResult, error) {
 	if err := InitState(); err != nil {
 		return PlayStartResult{}, err
 	}
-	if speed <= 0 {
+	if speed < 1 {
 		speed = 1
+	}
+	if speed > 25 {
+		speed = 25
+	}
+	if tickSec <= 0 {
+		tickSec = 10
+	}
+	if tickSec < 1 {
+		tickSec = 1
+	}
+	if tickSec > 30 {
+		tickSec = 30
 	}
 
 	playMu.Lock()
@@ -970,7 +1001,11 @@ func StartPlay(objectID string, speed float64, limit int, onEvent func(PlayEvent
 		}
 		startMsg := fmt.Sprintf("准备播放 %d 个任务点，合计 %.1f 小时", len(todo), float64(totalSec)/3600)
 		if limited > 0 && speed > 1 {
-			startMsg += fmt.Sprintf("；%d 个限 1 倍速，会按 1 倍播放", limited)
+			if allowLimited {
+				startMsg += fmt.Sprintf("；%d 个限速点按 %g 倍播放（已忽略限速）", limited, speed)
+			} else {
+				startMsg += fmt.Sprintf("；%d 个限 1 倍速，会按 1 倍播放", limited)
+			}
 		}
 		emit(PlayEvent{State: "starting", Message: startMsg, Total: len(todo)})
 
@@ -995,7 +1030,7 @@ func StartPlay(objectID string, speed float64, limit int, onEvent func(PlayEvent
 			emit(PlayEvent{State: "video", Message: "开始播放：" + oriented.Title, ObjectID: oriented.ObjectID, Title: oriented.Title, Index: i + 1, Total: len(todo), Duration: float64(oriented.AttDuration), SpeedLimited: speedLimited(oriented.OtherInfo), Ok: ok, Fail: fail, Skipped: skipped})
 
 			index := i + 1
-			passed, err := playVideoGUI(c, t, oriented, speed, 10, cancel, func(played, dur float64) {
+			passed, err := playVideoGUI(c, t, oriented, speed, tickSec, allowLimited, cancel, func(played, dur float64) {
 				percent := 0.0
 				if dur > 0 {
 					percent = math.Round(played/dur*1000) / 10
@@ -1068,9 +1103,10 @@ func sleepPlay(sec float64, cancel <-chan struct{}) bool {
 }
 
 // playVideoGUI 是上游 playOne 的界面版：循环与重试策略保持一致，
-// 但每一步通过 onProgress 回报进度，并且可以中途停止。
+// 但每一步通过 onProgress 回报进度，并且可以中途停止；tickSec 为上报间隔，
+// allowLimited 为 true 时忽略限速标记按 speed 播放。
 // 签名、上报参数、限速判断仍走上游 report / videoMeta / courseRT / speedLimited。
-func playVideoGUI(c *Client, t Target, v VideoPoint, speed float64, tickSec float64, cancel <-chan struct{}, onProgress func(played, dur float64)) (bool, error) {
+func playVideoGUI(c *Client, t Target, v VideoPoint, speed float64, tickSec float64, allowLimited bool, cancel <-chan struct{}, onProgress func(played, dur float64)) (bool, error) {
 	st, err := videoMeta(c, v)
 	if err != nil {
 		return false, err
@@ -1081,7 +1117,7 @@ func playVideoGUI(c *Client, t Target, v VideoPoint, speed float64, tickSec floa
 		return false, fmt.Errorf("时长异常: %v", dur)
 	}
 	target := dur - 2
-	if speedLimited(v.OtherInfo) && speed > 1 {
+	if speedLimited(v.OtherInfo) && speed > 1 && !allowLimited {
 		speed = 1
 	}
 	if tickSec <= 0 {
@@ -1100,6 +1136,8 @@ func playVideoGUI(c *Client, t Target, v VideoPoint, speed float64, tickSec floa
 		played = math.Max(target-step, 0)
 	}
 	onProgress(played, dur)
+	tracePlay("上报开始 task=%s dur=%.0f target=%.0f step=%.0f tick=%.1fs rt=%.2f 当前=%.0f",
+		v.ObjectID, dur, target, step, tickSec, rt, played)
 	for attempt := 0; attempt < 400; attempt++ {
 		if isPlayCancelled(cancel) {
 			return false, errPlayCancelled
@@ -1107,8 +1145,10 @@ func playVideoGUI(c *Client, t Target, v VideoPoint, speed float64, tickSec floa
 		played = math.Min(played+step, target)
 		passed, err := report(c, t, v, st, played, dur, rt)
 		if err != nil {
+			tracePlay("上报 %s played=%.0f/%.0f 错误=%v", v.ObjectID, played, dur, err)
 			return false, err
 		}
+		tracePlay("上报 %s 第 %d 次 played=%.0f/%.0f passed=%v", v.ObjectID, attempt+1, played, dur, passed)
 		onProgress(played, dur)
 		if passed {
 			return true, nil
@@ -1129,7 +1169,9 @@ func playVideoGUI(c *Client, t Target, v VideoPoint, speed float64, tickSec floa
 			st = st2
 		}
 		onProgress(dur*pct, dur)
-		if passed, err := report(c, t, v, st, dur*pct, dur, rt); err == nil && passed {
+		passed, err := report(c, t, v, st, dur*pct, dur, rt)
+		tracePlay("阶梯 %s %.0f%% passed=%v err=%v", v.ObjectID, pct*100, passed, err)
+		if err == nil && passed {
 			return true, nil
 		}
 		if sleepPlay(math.Max(tickSec/2, 1), cancel) {
@@ -1143,18 +1185,22 @@ func playVideoGUI(c *Client, t Target, v VideoPoint, speed float64, tickSec floa
 		}
 		st2, err := videoMeta(c, v)
 		if err != nil {
+			tracePlay("换 token 失败 %s err=%v", v.ObjectID, err)
 			if sleepPlay(2, cancel) {
 				return false, errPlayCancelled
 			}
 			continue
 		}
-		if passed, err := report(c, t, v, st2, dur*0.97, dur, rt); err == nil && passed {
+		passed, err := report(c, t, v, st2, dur*0.97, dur, rt)
+		tracePlay("换 token 补报 %s 第 %d 次 passed=%v err=%v", v.ObjectID, i+1, passed, err)
+		if err == nil && passed {
 			return true, nil
 		}
 		if sleepPlay(3, cancel) {
 			return false, errPlayCancelled
 		}
 	}
+	tracePlay("放弃 %s dur=%.0f：多轮上报后仍未通过", v.ObjectID, dur)
 	return false, fmt.Errorf("多次上报仍未通过")
 }
 
@@ -1206,39 +1252,142 @@ func ScanCourse() (CourseDetail, error) {
 	return buildCourseDetail()
 }
 
-// CompleteDocs 完成未完成的文档任务（上游 cmdDoc），完成后重新扫描刷新状态。
-func CompleteDocs() (CourseDetail, error) {
-	if err := InitState(); err != nil {
-		return CourseDetail{}, err
-	}
-	t, err := loadTarget()
-	if err != nil {
-		return CourseDetail{}, fmt.Errorf("还没有选择课程，先在课程列表里选一门")
-	}
-	scan, err := loadScanFor(t)
-	if err != nil {
-		return CourseDetail{}, fmt.Errorf("还没有扫描文档任务，先点“扫描文档任务”")
-	}
+// CompleteDocsResult 完成文档的结果：服务器口径的完成/跳过/失败数量，加上刷新后的课程详情。
+type CompleteDocsResult struct {
+	Detail  CourseDetail `json:"detail"`
+	Done    int          `json:"done"`
+	Skipped int          `json:"skipped"`
+	Failed  int          `json:"failed"`
+	Pending int          `json:"pending"`
+	Message string       `json:"message"`
+}
+
+// countPendingDocs 数扫描结果里还没完成的文档。
+func countPendingDocs(scan *ScanResult) int {
 	pending := 0
 	for _, r := range scan.Rows {
 		if isDocTaskRow(r) && !r.IsPassed {
 			pending++
 		}
 	}
+	return pending
+}
+
+// markDocRowsPassed 把还没完成的文档行标记成已完成（只用于“服务器确认全部完成”的情况：
+// 平台卡片不回写 isPassed 时，靠本地标记让列表和进度对得上；重新扫描会以平台状态为准）。
+func markDocRowsPassed(scan *ScanResult) int {
+	marked := 0
+	for i := range scan.Rows {
+		if isDocTaskRow(scan.Rows[i]) && !scan.Rows[i].IsPassed {
+			scan.Rows[i].IsPassed = true
+			marked++
+		}
+	}
+	return marked
+}
+
+// parseDocLog 从 gcli.log 的新增内容里读最后一行“完成 X，跳过 Y，失败 Z”。
+// 上游 cmdDoc 不返回数量，只写日志，所以这里按日志口径给界面反馈。
+func parseDocLog(text string) (done, skipped, failed int, ok bool) {
+	pattern := regexp.MustCompile(`完成 (\d+)，跳过 (\d+)，失败 (\d+)`)
+	matches := pattern.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return 0, 0, 0, false
+	}
+	last := matches[len(matches)-1]
+	done, _ = strconv.Atoi(last[1])
+	skipped, _ = strconv.Atoi(last[2])
+	failed, _ = strconv.Atoi(last[3])
+	return done, skipped, failed, true
+}
+
+// readAppendedLog 读取 gcli.log 从 offset 之后新增的内容，并返回新的 offset。
+func readAppendedLog(offset int64) (string, int64) {
+	data, err := os.ReadFile(statePath("gcli.log"))
+	if err != nil {
+		return "", offset
+	}
+	if int64(len(data)) < offset {
+		offset = 0
+	}
+	return string(data[offset:]), int64(len(data))
+}
+
+// CompleteDocs 完成未完成的文档任务（上游 cmdDoc），完成后重新扫描刷新状态。
+// 结果按“服务器确认完成的数量”给，因为平台卡片上的 isPassed 可能不会立刻更新。
+func CompleteDocs() (CompleteDocsResult, error) {
+	if err := InitState(); err != nil {
+		return CompleteDocsResult{}, err
+	}
+	t, err := loadTarget()
+	if err != nil {
+		return CompleteDocsResult{}, fmt.Errorf("还没有选择课程，先在课程列表里选一门")
+	}
+	scan, err := loadScanFor(t)
+	if err != nil {
+		return CompleteDocsResult{}, fmt.Errorf("还没有扫描文档任务，先点“扫描文档任务”")
+	}
+	pending := countPendingDocs(scan)
 	if pending == 0 {
-		return buildCourseDetail()
+		detail, err := buildCourseDetail()
+		if err != nil {
+			return CompleteDocsResult{}, err
+		}
+		return CompleteDocsResult{Detail: detail, Message: "没有未完成的文档任务"}, nil
+	}
+	before, _ := os.Stat(statePath("gcli.log"))
+	offset := int64(0)
+	if before != nil {
+		offset = before.Size()
 	}
 	if err := cmdDoc(nil); err != nil {
-		return CourseDetail{}, fmt.Errorf("完成文档任务失败: %w", err)
+		return CompleteDocsResult{}, fmt.Errorf("完成文档任务失败: %w", err)
 	}
+	done, skipped, failed, counted := parseDocLog(func() string {
+		chunk, _ := readAppendedLog(offset)
+		return chunk
+	}())
 	c := newClient(NewJar())
 	if err := loadSession(c); err != nil {
-		return CourseDetail{}, fmt.Errorf("文档任务已处理，但读取登录态失败，请重新登录后确认状态")
+		return CompleteDocsResult{}, fmt.Errorf("文档任务已处理，但读取登录态失败，请重新登录后确认状态")
 	}
 	if _, err := scanCourse(c, t); err != nil {
-		return CourseDetail{}, fmt.Errorf("文档任务已处理，但重新扫描失败: %w；可以稍后点“重新扫描”确认状态", err)
+		return CompleteDocsResult{}, fmt.Errorf("文档任务已处理，但重新扫描失败: %w；可以稍后点“重新扫描”确认状态", err)
 	}
-	return buildCourseDetail()
+	detail, err := buildCourseDetail()
+	if err != nil {
+		return CompleteDocsResult{}, err
+	}
+	afterPending := pending
+	if fresh, err := loadScanFor(t); err == nil {
+		afterPending = countPendingDocs(fresh)
+		// 服务器确认全部完成、但平台卡片没回写 isPassed 时，本地标记成已完成，
+		// 让列表和进度立刻对上（重新扫描会重新以平台状态为准）。
+		if done > 0 && done >= pending && afterPending > 0 {
+			if marked := markDocRowsPassed(fresh); marked > 0 {
+				if err := writeJSON(statePath("scan.json"), fresh); err == nil {
+					if rebuilt, err := buildCourseDetail(); err == nil {
+						detail = rebuilt
+					}
+					afterPending = countPendingDocs(fresh)
+				}
+			}
+		}
+	}
+	res := CompleteDocsResult{Detail: detail, Done: done, Skipped: skipped, Failed: failed, Pending: afterPending}
+	switch {
+	case done > 0 && afterPending == 0:
+		res.Message = fmt.Sprintf("服务器确认完成 %d 个文档，列表已标记完成", done)
+	case done > 0:
+		res.Message = fmt.Sprintf("服务器确认完成 %d 个文档；列表状态还没更新（平台有时延迟），稍后点“重新扫描”确认", done)
+	case failed > 0:
+		res.Message = fmt.Sprintf("服务器没有接受完成请求（失败 %d 个）；稍后重试，或去网页版点开几篇看看", failed)
+	case !counted:
+		res.Message = "请求已发出，但没读到完成数量；点“重新扫描”确认状态"
+	default:
+		res.Message = fmt.Sprintf("这次没有文档被处理（未完成 %d 个）", afterPending)
+	}
+	return res, nil
 }
 
 // ---- 作业与测验（只读浏览，不做自动答题） ----

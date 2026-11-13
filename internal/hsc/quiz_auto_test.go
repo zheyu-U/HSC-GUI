@@ -38,6 +38,32 @@ func workingQuizSettings() QuizSettings {
 	}
 }
 
+// 设置页默认显示 DeepSeek，但用户已经配过（启用或填了 Key）时不覆盖。
+func TestGUILLMDefaults(t *testing.T) {
+	cfg := &Config{LLM: LLMConfig{BaseURL: "https://api.openai.com/v1", Model: "gpt-4o-mini"}}
+	if base, model := guiLLMDefaults(cfg); base != guiDefaultLLMBaseURL || model != guiDefaultLLMModel {
+		t.Fatalf("未配置时应显示 DeepSeek 默认值，got %q / %q", base, model)
+	}
+
+	cfg.LLM.Enabled = true
+	if base, model := guiLLMDefaults(cfg); base != "https://api.openai.com/v1" || model != "gpt-4o-mini" {
+		t.Fatalf("启用后不该覆盖用户配置，got %q / %q", base, model)
+	}
+
+	cfg.LLM.Enabled = false
+	cfg.LLM.APIKey = "sk-test"
+	if base, _ := guiLLMDefaults(cfg); base != "https://api.openai.com/v1" {
+		t.Fatalf("填过 Key 不该覆盖地址，got %q", base)
+	}
+
+	cfg.LLM.APIKey = ""
+	cfg.LLM.BaseURL = "https://api.example.com/v1"
+	cfg.LLM.Model = "my-model"
+	if base, model := guiLLMDefaults(cfg); base != "https://api.example.com/v1" || model != "my-model" {
+		t.Fatalf("自定义配置不该被改，got %q / %q", base, model)
+	}
+}
+
 func TestQuizSettingsSaveAndMask(t *testing.T) {
 	prepareQuizState(t)
 

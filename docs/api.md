@@ -170,20 +170,35 @@
 逐章扫描附件（对应上游 `hsc scan`），结果写入 `state/course/scan.json`，返回刷新后的课程详情。
 扫描需要已登录并已配置课程，可能要十几秒；GUI 用 busy 状态提示。
 
-### CompleteDocs() -> CourseDetail
+### CompleteDocs() -> CompleteDocsResult
 
 完成未完成的文档任务（对应上游 `hsc doc`）：调用上游 `cmdDoc` 逐个完成，再重新扫描
 `scan.json` 刷新状态。未扫描时 reject，提示先点“扫描文档任务”。
 
-### StartPlay(objectID, speed, limit) -> PlayStartResult
+上游 `cmdDoc` 不返回数量，只把 `完成 X，跳过 Y，失败 Z` 写进 `state/gcli.log`；
+GUI 读本次新增日志来给结果，**不拿“完成前后未完成数量”当成功依据**——平台的卡片
+`isPassed` 有时不会马上回写，按数量会误报“没有文档完成”。
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| detail | CourseDetail | 重新扫描后的课程详情 |
+| done | number | 服务器确认完成的文档数 |
+| skipped | number | 上游跳过的数量 |
+| failed | number | 服务器拒绝的数量 |
+| pending | number | 重新扫描后仍未完成的文档数 |
+| message | string | 可直接展示的一句子；done>0 但列表仍显示未完成时会说明“平台有时延迟” |
+
+### StartPlay(objectID, speed, limit, tickSec, allowLimited) -> PlayStartResult
 
 后台播放视频任务点（对应上游 `hsc play`）。立即返回，进度通过 `play:progress` 事件推送。
 
 | 参数 | 类型 | 说明 |
 | --- | --- | --- |
 | objectID | string | 为空时播放未完成任务点；给值只播这一个视频 |
-| speed | number | 倍速，默认 1；限 1 倍速的任务点会自动按 1 倍播放 |
+| speed | number | 倍速 1–25，超出范围后端收敛；默认 1 |
 | limit | number | 大于 0 时本次最多处理这么多个任务点（objectID 模式忽略）；0 表示全部 |
+| tickSec | number | 两次上报之间的真实间隔秒数 1–30，默认 10；超出范围后端收敛 |
+| allowLimited | boolean | true 时限 1 倍速的任务点也按 speed 播放；GUI 固定传 true（设置页不再有开关），后端默认按 false 处理 |
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -192,7 +207,11 @@
 | message | string | 结果说明，可直接展示 |
 
 - 播放循环在 `internal/hsc/gui.go` 里按 tick 编排，签名、上报参数与限速判断复用上游
-  `report` / `videoMeta` / `refreshedVideo` / `courseRT` / `speedLimited`
+  `report` / `videoMeta` / `refreshedVideo` / `courseRT` / `speedLimited`；
+  step = speed × tickSec，两次上报之间等 tickSec 秒
+- `allowLimited` 由界面固定传 true：限速课也按设置的倍速播（设置页只有一行风险说明，
+  不再提供开关）；后端保留 false = 强制 1 倍的语义给 CLI/测试。开始播放的 `starting`
+  事件会说明有几个限速点
 - 每个任务点通过后会立刻把 `isPassed` 写回 `state/course/course.json`，CLI 读同一份缓存
 - 同一时间只允许一个播放任务，重复调用 reject；未登录、未抓取课程结构时 reject
 
@@ -346,6 +365,7 @@ max_tokens 1 到 128000、超时 1 到 600 秒、间隔 0 到 60000 毫秒、重
 | os / arch | string | 操作系统与架构 |
 | cookieCount | number | 当前 cookie 条数 |
 | loggedIn | boolean | 本地是否存在登录态 |
+| logPath | string | 今天的调试日志文件绝对路径（debug 构建才有值） |
 
 ### DebugLog() -> DebugEntry[]
 
@@ -357,11 +377,17 @@ max_tokens 1 到 128000、超时 1 到 600 秒、间隔 0 到 60000 毫秒、重
 | kind | string | `启动` `调用` `结果` `错误` `事件` |
 | message | string | 日志内容 |
 
-最多保留最近 300 条，不写入磁盘。
+内存里最多保留最近 300 条；debug 构建同时追加到
+`state/logs/gui-debug-YYYYMMDD.log`（一天一个文件，超过 2MB 轮转成 `.1.log`），
+release 构建不写任何日志文件。
 
 ### ClearDebugLog() -> void
 
-清空调试日志，仅 debug 构建有效。
+清空内存里的调试日志（不动磁盘上的日志文件），仅 debug 构建有效。
+
+### OpenDebugLog() -> void
+
+在资源管理器里选中今天的调试日志文件，仅 debug 构建可用；没有日志文件时返回错误。
 
 ## 事件
 

@@ -1,5 +1,5 @@
 <script setup>
-import {computed, onMounted, onUnmounted, ref, watch} from 'vue'
+import {computed, nextTick, onMounted, onUnmounted, ref, watch} from 'vue'
 import {
   AppMode,
   CancelPlay,
@@ -20,6 +20,7 @@ import {
   ListCourses,
   LoginPassword,
   Logout,
+  OpenDebugLog,
   PeekQuizzes,
   RefreshCourse,
   SaveQuizSettings,
@@ -33,20 +34,28 @@ import {
   StartQRLogin,
   SubmitQuizzes,
 } from '../wailsjs/go/main/App'
-import {EventsOff, EventsOn, IsNotificationAvailable, RequestNotificationAuthorization, SendNotification} from '../wailsjs/runtime/runtime'
+import {EventsOff, EventsOn, IsNotificationAvailable, RequestNotificationAuthorization, SendNotification, BrowserOpenURL} from '../wailsjs/runtime/runtime'
 
 const TITLES = [
   '今天打算刷什么？',
-  '今天从哪门课开始？',
-  '先把任务点清一清',
-  '该刷课了',
+  '不只优雅，不止高效',
+  '快进的是课，慢下来的是你',
+  '省下的时间，都归你',
+  '任务点，点到为止',
+  '今天也要好好「过」',
+  '让视频自己看完自己',
+  '把时间留给需要的灵魂',
+  '让每一分进度，都算数',
+  '刷课，本来就该这么省心',
+  '清空，再出发',
+  '今天，就把课清了',
+  '何止快，简直快',
+  '省下的时间，都是你的',
+  '把重复的日子，过成自己的样子',
+  '你忙你的，课有它看',
+  '不用管，它自己来',
+  '课，我来；觉，你来',
 ]
-
-const COURSE_PAGE_SIZE = 5
-const CHAPTER_PAGE_SIZE = 8
-const DOC_PAGE_SIZE = 10
-const QUIZ_PAGE_SIZE = 8
-const QUESTION_PAGE_SIZE = 5
 
 const QUIZ_TYPES = [
   {value: 'choice', label: '单选'},
@@ -62,7 +71,13 @@ const mode = ref({mode: 'release', debug: false, version: ''})
 const session = ref(null)
 const notice = ref('')
 const noticeKind = ref('info')
+// 成功提示正在淡出（这段时间里文案还留着，只是透明度降下去）
+const noticeLeaving = ref(false)
 const menuOpen = ref(false)
+const aboutOpen = ref(false)
+const aboutCloseRef = ref(null)
+const helpOpen = ref(false)
+const helpCloseRef = ref(null)
 
 const view = ref('login')
 const justLoggedIn = ref(false)
@@ -88,11 +103,25 @@ const courseDetail = ref(null)
 const courseLoading = ref(false)
 const courseBusy = ref(false)
 const courseError = ref('')
+// 云端取数的加载提示文案（空字符串表示没在取数）
+const cloudLoading = ref('')
 
-const coursePage = ref(1)
-const chapterPage = ref(1)
-const docPage = ref(1)
-const openChapterId = ref('')
+// 底部消息条：加载中优先显示加载文案（带转圈），否则显示普通提示（成功 / 错误）
+const messageText = computed(() => (cloudLoading.value ? cloudLoading.value : notice.value))
+const messageKind = computed(() => (cloudLoading.value ? 'loading' : noticeKind.value))
+
+// 加载提示出现时立刻把正在淡出的成功提示收掉，避免互相压着
+watch(cloudLoading, (value) => {
+  if (value) {
+    noticeLeaving.value = false
+  }
+})
+
+// 视频 / 文档清单的筛选状态：all | todo | done
+const videoFilter = ref('all')
+const docFilter = ref('all')
+// 课程页当前选中的块：video | doc | quiz（三张入口卡当标签页）
+const courseTab = ref('video')
 const playLimit = ref(0)
 const courseURL = ref('')
 const courseURLBusy = ref(false)
@@ -102,8 +131,34 @@ const quizBusy = ref(false)
 const quizError = ref('')
 const quizSelected = ref('')
 const quizQuestions = ref([])
-const quizListPage = ref(1)
-const quizQuestionPage = ref(1)
+// 这次进课程页有没有自动从云端抓过题（本地没缓存时自动抓一次，不反复抓）
+const quizAutoFetched = ref(false)
+// 本次课程页会话是否已经自动扫描过附件（失败后不再反复自动扫，交给工具条按钮）
+const quizAutoScanned = ref(false)
+// 作业块工具条的主按钮：没扫描 → 扫描附件；扫描了没题 → 抓取题目；抓过 → 刷新
+const quizPrimaryAction = computed(() => {
+  const overview = quizOverview.value
+  if (!overview || !overview.scanned) {
+    return 'scan'
+  }
+  if (!(overview.items || []).length) {
+    return 'none'
+  }
+  return Number(overview.fetchedCount) > 0 ? 'refresh' : 'fetch'
+})
+const quizPrimaryLabel = computed(() => {
+  if (quizPrimaryAction.value === 'scan') {
+    return '扫描附件'
+  }
+  if (quizPrimaryAction.value === 'fetch') {
+    return '抓取题目'
+  }
+  return '刷新'
+})
+const quizReady = computed(() => {
+  const overview = quizOverview.value
+  return !!(overview && overview.scanned && (overview.items || []).length)
+})
 const quizSettings = ref(null)
 const quizSettingsBusy = ref(false)
 const quizSettingsError = ref('')
@@ -128,6 +183,53 @@ const sessionRepairing = ref(false)
 const docBusy = ref(false)
 const playRunning = ref(false)
 const playSpeed = ref(1)
+// 上报间隔（真实秒数），和倍速一起存在本机 localStorage
+const playTick = ref(10)
+
+const PLAY_SETTINGS_KEY = 'hsc.playSettings'
+
+function clampNumber(value, min, max, fallback) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) {
+    return fallback
+  }
+  return Math.min(max, Math.max(min, n))
+}
+
+function loadPlaySettings() {
+  try {
+    const raw = window.localStorage.getItem(PLAY_SETTINGS_KEY)
+    if (!raw) {
+      return
+    }
+    const saved = JSON.parse(raw)
+    playSpeed.value = clampNumber(saved.speed, 1, 25, 1)
+    playTick.value = clampNumber(saved.tick, 1, 30, 10)
+  } catch (e) {
+    // 本机设置坏了就用默认值
+  }
+}
+
+function savePlaySettings() {
+  try {
+    window.localStorage.setItem(PLAY_SETTINGS_KEY, JSON.stringify({
+      speed: Number(playSpeed.value) || 1,
+      tick: Number(playTick.value) || 10,
+    }))
+  } catch (e) {
+    // 存不了就算了，本次运行仍然生效
+  }
+}
+
+function resetPlaySettings() {
+  playSpeed.value = 1
+  playTick.value = 10
+  savePlaySettings()
+  setNotice('播放设置已恢复默认', 'ok')
+}
+
+loadPlaySettings()
+watch([playSpeed, playTick], savePlaySettings)
 const playState = ref({
   state: '',
   message: '',
@@ -143,6 +245,31 @@ const playState = ref({
   fail: 0,
   skipped: 0,
 })
+
+// 播放失败的任务点（按 objectId）；同一次播放里重试通过会清掉，切课程/重抓结构时清空
+const failedVideos = ref(new Set())
+
+function markVideoFailed(objectID) {
+  if (!objectID) {
+    return
+  }
+  const next = new Set(failedVideos.value)
+  next.add(objectID)
+  failedVideos.value = next
+}
+
+function clearVideoFailed(objectID) {
+  if (!objectID || !failedVideos.value.has(objectID)) {
+    return
+  }
+  const next = new Set(failedVideos.value)
+  next.delete(objectID)
+  failedVideos.value = next
+}
+
+function isVideoFailed(objectID) {
+  return !!objectID && failedVideos.value.has(objectID)
+}
 
 const debugInfo = ref(null)
 const debugLog = ref([])
@@ -203,37 +330,88 @@ const docScanned = computed(() => !!(courseDetail.value && courseDetail.value.do
 const docUnpassed = computed(() => docs.value.filter((d) => !d.isPassed).length)
 const docPassed = computed(() => docs.value.filter((d) => d.isPassed).length)
 
-// 分页：列表在模板里只渲染当前页，页数按实际长度算。
-function totalPages(total, size) {
-  return Math.max(1, Math.ceil(total / size))
-}
-function clampPage(page, total, size) {
-  return Math.min(Math.max(1, page), totalPages(total, size))
-}
-function pageItems(list, page, size) {
-  const current = clampPage(page, list.length, size)
-  return list.slice((current - 1) * size, current * size)
+const chapters = computed(() => (courseDetail.value && courseDetail.value.chapters) || [])
+
+// 视频页：总览数字与章节进度；列表全部列出，不做分页
+const videoStats = computed(() => {
+  const list = (courseDetail.value && courseDetail.value.videos) || []
+  const passed = list.filter((v) => v.isPassed).length
+  return {
+    total: list.length,
+    passed,
+    todo: list.length - passed,
+    percent: list.length ? Math.round((passed / list.length) * 100) : 0,
+  }
+})
+
+function chapterVideos(ch) {
+  return videosByChapter.value[ch.id] || []
 }
 
-const chapters = computed(() => (courseDetail.value && courseDetail.value.chapters) || [])
-const courseTotalPages = computed(() => totalPages(courseList.value.length, COURSE_PAGE_SIZE))
-const courseCurrentPage = computed(() => clampPage(coursePage.value, courseList.value.length, COURSE_PAGE_SIZE))
-const pagedCourses = computed(() => pageItems(courseList.value, coursePage.value, COURSE_PAGE_SIZE))
-const chapterTotalPages = computed(() => totalPages(chapters.value.length, CHAPTER_PAGE_SIZE))
-const chapterCurrentPage = computed(() => clampPage(chapterPage.value, chapters.value.length, CHAPTER_PAGE_SIZE))
-const pagedChapters = computed(() => pageItems(chapters.value, chapterPage.value, CHAPTER_PAGE_SIZE))
-const docTotalPages = computed(() => totalPages(docs.value.length, DOC_PAGE_SIZE))
-const docCurrentPage = computed(() => clampPage(docPage.value, docs.value.length, DOC_PAGE_SIZE))
-const pagedDocs = computed(() => pageItems(docs.value, docPage.value, DOC_PAGE_SIZE))
+function chapterPassed(ch) {
+  return chapterVideos(ch).filter((v) => v.isPassed).length
+}
+
+function chapterPercent(ch) {
+  const list = chapterVideos(ch)
+  return list.length ? Math.round((chapterPassed(ch) / list.length) * 100) : 0
+}
+
+// 章节内按当前筛选只渲染匹配的视频；全部时不过滤
+function chapterTaskVideos(ch) {
+  const list = chapterVideos(ch)
+  if (videoFilter.value === 'todo') {
+    return list.filter((v) => !v.isPassed)
+  }
+  if (videoFilter.value === 'done') {
+    return list.filter((v) => v.isPassed)
+  }
+  return list
+}
+
+// 默认只展开第一个还有未完成任务的章节（列表不再分页，全展开会太长）；筛选时全部展开
+const firstTodoChapterId = computed(() => {
+  const hit = chapters.value.find((ch) => chapterVideos(ch).some((v) => !v.isPassed))
+  return hit ? hit.id : ''
+})
+
+function isChapterOpen(ch) {
+  if (videoFilter.value !== 'all') {
+    return true
+  }
+  return ch.id === firstTodoChapterId.value
+}
+
+const videoFilteredChapters = computed(() => {
+  if (videoFilter.value === 'all') {
+    return chapters.value
+  }
+  const wantPassed = videoFilter.value === 'done'
+  return chapters.value.filter((ch) => chapterVideos(ch).some((v) => !!v.isPassed === wantPassed))
+})
+
+// 文档页：完成百分比；列表全部列出，不做分页
+const docPercent = computed(() => (docs.value.length ? Math.round((docPassed.value / docs.value.length) * 100) : 0))
+
+// 标题里已经带了“第 N 章”就不再重复显示章节
+function docChapterLabel(d) {
+  if (!d.chapterIndex) {
+    return ''
+  }
+  const chapter = '第 ' + d.chapterIndex + ' 章'
+  return String(d.title || '').indexOf(chapter) === 0 ? '' : chapter
+}
+
+const docFilteredDocs = computed(() => {
+  if (docFilter.value === 'all') {
+    return docs.value
+  }
+  const wantPassed = docFilter.value === 'done'
+  return docs.value.filter((d) => !!d.isPassed === wantPassed)
+})
 
 const quizItems = computed(() => (quizOverview.value && quizOverview.value.items) || [])
-const quizTotalPages = computed(() => totalPages(quizItems.value.length, QUIZ_PAGE_SIZE))
-const quizCurrentPage = computed(() => clampPage(quizListPage.value, quizItems.value.length, QUIZ_PAGE_SIZE))
-const pagedQuizItems = computed(() => pageItems(quizItems.value, quizListPage.value, QUIZ_PAGE_SIZE))
 const selectedQuizItem = computed(() => quizItems.value.find((q) => q.workId === quizSelected.value) || null)
-const quizQuestionTotalPages = computed(() => totalPages(quizQuestions.value.length, QUESTION_PAGE_SIZE))
-const quizQuestionCurrentPage = computed(() => clampPage(quizQuestionPage.value, quizQuestions.value.length, QUESTION_PAGE_SIZE))
-const pagedQuizQuestions = computed(() => pageItems(quizQuestions.value, quizQuestionPage.value, QUESTION_PAGE_SIZE))
 
 const courseName = computed(() => {
   if (!hasCourse.value || !courseDetail.value.target) {
@@ -259,22 +437,13 @@ const pageTitle = computed(() => {
     return '课程'
   }
   if (page.value === 'coursehome') {
-    return courseName.value || '课程主页'
-  }
-  if (page.value === 'video') {
-    return '视频任务'
-  }
-  if (page.value === 'doc') {
-    return '文档任务'
-  }
-  if (page.value === 'quiz') {
-    return '作业与测验'
+    return courseName.value || '课程'
   }
   if (page.value === 'settings') {
     return '测验设置'
   }
-  if (page.value === 'about') {
-    return '关于'
+  if (page.value === 'play-settings') {
+    return '播放设置'
   }
   if (page.value === 'debug') {
     return '调试'
@@ -292,24 +461,81 @@ const pageLead = computed(() => {
     return '选择一门课程，进入课程主页。'
   }
   if (page.value === 'coursehome') {
-    return courseTeacher.value ? '任课教师 ' + courseTeacher.value : '课程结构、视频、文档和作业与测验的入口'
-  }
-  if (page.value === 'video' || page.value === 'doc' || page.value === 'quiz') {
-    return courseName.value
+    // 课程元信息放在标题下：任课教师 · 章节数 · 总时长（原“完成概况”搬到这里）
+    const parts = []
+    if (courseTeacher.value) {
+      parts.push('任课教师 ' + courseTeacher.value)
+    }
+    const summary = courseDetail.value && courseDetail.value.summary
+    if (summary) {
+      if (summary.chapters) {
+        parts.push(summary.chapters + ' 章')
+      }
+      if (summary.durationHours) {
+        parts.push('总时长 ' + summary.durationHours + ' 小时')
+      }
+    }
+    return parts.join(' · ') || '视频、文档和作业与测验都在这一页'
   }
   if (page.value === 'settings') {
     return '自动答题的接口、题型与交卷选项。'
   }
+  if (page.value === 'play-settings') {
+    return '倍速与上报间隔。'
+  }
   return ''
+})
+
+const courseTabTitle = computed(() => {
+  if (courseTab.value === 'doc') {
+    return '文档任务'
+  }
+  if (courseTab.value === 'quiz') {
+    return '作业与测验'
+  }
+  return '视频任务'
 })
 
 function friendly(e) {
   return String(e).replace(/^Error:\s*/, '')
 }
 
+let noticeTimer = 0
+
+function clearNoticeTimer() {
+  if (noticeTimer) {
+    clearTimeout(noticeTimer)
+    noticeTimer = 0
+  }
+  noticeLeaving.value = false
+}
+
+// 成功提示 1.5 秒后开始淡出（1 秒透明度过渡，文案在淡出期间保留）；错误和普通提示留到下一次操作
 function setNotice(message, kind) {
+  clearNoticeTimer()
   notice.value = message || ''
   noticeKind.value = kind || 'info'
+  if (notice.value && noticeKind.value === 'ok') {
+    const text = notice.value
+    noticeTimer = setTimeout(() => {
+      if (notice.value !== text) {
+        return
+      }
+      noticeLeaving.value = true
+      noticeTimer = setTimeout(() => {
+        noticeTimer = 0
+        if (notice.value === text) {
+          notice.value = ''
+        }
+        noticeLeaving.value = false
+      }, 1000)
+    }, 1500)
+  }
+}
+
+// 播放中点这些按钮不执行，只在消息条说明原因（按钮本身保持可点，disabled 会吞掉点击）
+function sayPlaying() {
+  setNotice('正在播放中，先停止播放再操作', 'info')
 }
 
 const AUTH_HINTS = ['未登录', '登录态', '会话', 'cookie', '重新登录', '登录已失效']
@@ -423,6 +649,32 @@ function toggleMenu() {
   menuOpen.value = !menuOpen.value
 }
 
+async function openAbout() {
+  closeMenu()
+  aboutOpen.value = true
+  await nextTick()
+  if (aboutCloseRef.value) {
+    aboutCloseRef.value.focus()
+  }
+}
+
+function closeAbout() {
+  aboutOpen.value = false
+}
+
+async function openHelp() {
+  closeMenu()
+  helpOpen.value = true
+  await nextTick()
+  if (helpCloseRef.value) {
+    helpCloseRef.value.focus()
+  }
+}
+
+function closeHelp() {
+  helpOpen.value = false
+}
+
 function onDocumentClick() {
   closeMenu()
 }
@@ -430,15 +682,19 @@ function onDocumentClick() {
 function onKeydown(e) {
   if (e.key === 'Escape') {
     closeMenu()
+    if (aboutOpen.value) {
+      closeAbout()
+    }
+    if (helpOpen.value) {
+      closeHelp()
+    }
   }
 }
 
 const PAGE_PARENT = {
   coursehome: 'course',
-  video: 'coursehome',
-  doc: 'coursehome',
-  quiz: 'coursehome',
-  settings: 'quiz',
+  settings: 'coursehome',
+  'play-settings': 'coursehome',
 }
 
 function parentPage(name) {
@@ -453,7 +709,7 @@ function showPage(name) {
   if (name === 'debug' && !mode.value.debug) {
     return
   }
-  if ((name === 'coursehome' || name === 'video' || name === 'doc' || name === 'quiz' || name === 'settings') && !hasCourse.value) {
+  if ((name === 'coursehome' || name === 'settings' || name === 'play-settings') && !hasCourse.value) {
     name = loggedIn.value ? 'course' : 'login'
   }
   if (page.value !== name) {
@@ -461,6 +717,9 @@ function showPage(name) {
   }
   if (page.value === 'coursehome' || name === 'coursehome') {
     resetCoursehomeFade()
+  }
+  if (name === 'coursehome' && !courseDetail.value && loggedIn.value) {
+    loadCourseDetail()
   }
   page.value = name
   closeMenu()
@@ -476,12 +735,6 @@ function showPage(name) {
       loadCourses(true)
     }
   }
-  if (name === 'quiz' && !quizOverview.value && !quizBusy.value) {
-    loadQuizOverview()
-  }
-  if (name === 'quiz' && !quizBank.value) {
-    loadQuizBank()
-  }
   if (name === 'settings') {
     loadQuizSettings()
     loadQuizBank()
@@ -489,6 +742,66 @@ function showPage(name) {
   if ((name === 'home' || name === 'debug') && mode.value.debug) {
     refreshDebug()
   }
+}
+
+// 播放设置：播放中不让进，避免以为改了会对当前任务生效
+function openPlaySettings() {
+  if (playRunning.value) {
+    sayPlaying()
+    return
+  }
+  showPage('play-settings')
+}
+
+// 课程页的三张入口卡当标签页用：视频/文档都用课程缓存；作业块有本地缓存就直接读，
+// 没有缓存就自动去云端抓一次。
+function selectCourseTab(name) {
+  if (courseTab.value === name) {
+    return
+  }
+  courseTab.value = name
+  window.scrollTo(0, 0)
+  if (name === 'quiz') {
+    ensureQuizData()
+  }
+}
+
+async function ensureQuizData() {
+  if (!quizBank.value) {
+    loadQuizBank()
+  }
+  if (quizBusy.value) {
+    return
+  }
+  if (!quizOverview.value) {
+    await loadQuizOverview()
+  }
+  let overview = quizOverview.value
+  if (!overview) {
+    return
+  }
+  // 播放中不自动做云端动作（按钮此时也是不可用的），等停播后再进块
+  if (playRunning.value) {
+    return
+  }
+  // 本地还没有扫描结果：进块自动扫描课程附件，扫完再决定要不要抓题
+  if (!overview.scanned && !quizAutoScanned.value) {
+    quizAutoScanned.value = true
+    await scanForQuiz(true)
+    overview = quizOverview.value
+    if (!overview) {
+      return
+    }
+  }
+  if (!overview.scanned || quizAutoFetched.value) {
+    return
+  }
+  const items = overview.items || []
+  if (!items.length || Number(overview.fetchedCount) > 0) {
+    return
+  }
+  // 有扫描结果但一份题都没抓过：当作没有本地缓存，自动从云端取
+  await refreshQuizzes()
 }
 
 function openCourse() {
@@ -500,7 +813,11 @@ function openCourse() {
 }
 
 async function openCourseRow(item) {
-  if (!item || courseBusy.value || courseLoading.value || playRunning.value) {
+  if (playRunning.value) {
+    sayPlaying()
+    return
+  }
+  if (!item || courseBusy.value || courseLoading.value) {
     return
   }
   if (isCurrent(item) && hasCourse.value) {
@@ -514,6 +831,10 @@ async function openCourseRow(item) {
 }
 
 async function openCourseByURL() {
+  if (playRunning.value) {
+    sayPlaying()
+    return
+  }
   const raw = courseURL.value.trim()
   if (!raw || courseURLBusy.value) {
     return
@@ -521,16 +842,20 @@ async function openCourseByURL() {
   courseURLBusy.value = true
   courseError.value = ''
   setNotice('')
+  cloudLoading.value = '正在从云端打开课程…'
   try {
     const detail = await SelectCourseByURL(raw)
     courseDetail.value = detail
     playState.value = emptyPlayState()
-    chapterPage.value = 1
-    docPage.value = 1
-    openChapterId.value = ''
+    courseTab.value = 'video'
+    videoFilter.value = 'all'
+    docFilter.value = 'all'
     quizOverview.value = null
     quizSelected.value = ''
     quizQuestions.value = []
+    quizAutoFetched.value = false
+    quizAutoScanned.value = false
+    failedVideos.value = new Set()
     courseURL.value = ''
     await refreshSession()
     showPage('coursehome')
@@ -539,22 +864,9 @@ async function openCourseByURL() {
     await handleActionError(e, '按链接选课失败')
   } finally {
     courseURLBusy.value = false
+    cloudLoading.value = ''
     refreshDebug()
   }
-}
-
-function openVideoPage() {
-  openChapterId.value = ''
-  showPage('video')
-}
-
-function openVideoChapter(ch) {
-  const index = chapters.value.findIndex((item) => item.id === ch.id)
-  if (index >= 0) {
-    chapterPage.value = Math.floor(index / CHAPTER_PAGE_SIZE) + 1
-  }
-  openChapterId.value = ch.id
-  showPage('video')
 }
 
 // 课程主页滚动动画：标题和入口卡在视口里定住，课程结构面板升上来盖住时按滚动进度淡出。
@@ -619,7 +931,7 @@ function scheduleCoursehomeFade() {
   })
 }
 
-watch([page, courseDetail], scheduleCoursehomeFade, {flush: 'post'})
+watch([page, courseDetail, courseTab], scheduleCoursehomeFade, {flush: 'post'})
 
 function stopQrTimer() {
   if (qrTimer) {
@@ -671,6 +983,14 @@ async function clearDebug() {
   }
   debugLog.value = []
   refreshDebug()
+}
+
+async function openDebugLog() {
+  try {
+    await OpenDebugLog()
+  } catch (e) {
+    setNotice(friendly(e), 'error')
+  }
 }
 
 async function generateQr() {
@@ -823,15 +1143,12 @@ async function doLogout(all) {
     courseList.value = []
     courseDetail.value = null
     courseError.value = ''
-    coursePage.value = 1
-    chapterPage.value = 1
-    docPage.value = 1
-    openChapterId.value = ''
+    courseTab.value = 'video'
+    videoFilter.value = 'all'
+    docFilter.value = 'all'
     quizOverview.value = null
     quizSelected.value = ''
     quizQuestions.value = []
-    quizListPage.value = 1
-    quizQuestionPage.value = 1
     quizSettings.value = null
     quizBank.value = null
     quizSolving.value = false
@@ -874,58 +1191,88 @@ async function loadCourseDetail() {
 }
 
 async function loadCourses(refresh) {
-  if (!loggedIn.value) {
+  if (!loggedIn.value || courseLoading.value) {
     return
   }
   courseLoading.value = true
   courseError.value = ''
+  cloudLoading.value = '正在从云端获取课程列表…'
   try {
     courseList.value = await ListCourses(refresh !== false)
-    coursePage.value = 1
   } catch (e) {
     await handleInlineError(e, (message) => { courseError.value = message })
   } finally {
     courseLoading.value = false
+    cloudLoading.value = ''
     refreshDebug()
   }
 }
 
+// 课程页右上角的“刷新”：播放中不刷新，点了只提示；页面自动加载仍走 loadCourses
+function refreshCourseList() {
+  if (playRunning.value) {
+    sayPlaying()
+    return
+  }
+  loadCourses(true)
+}
+
 async function selectCourse(index) {
+  if (courseBusy.value) {
+    return
+  }
   courseBusy.value = true
   courseError.value = ''
+  cloudLoading.value = '正在从云端打开课程…'
   try {
     const detail = await SelectCourse(index)
     courseDetail.value = detail
     playState.value = emptyPlayState()
-    chapterPage.value = 1
-    docPage.value = 1
-    openChapterId.value = ''
+    courseTab.value = 'video'
+    videoFilter.value = 'all'
+    docFilter.value = 'all'
     quizOverview.value = null
     quizSelected.value = ''
     quizQuestions.value = []
+    quizAutoFetched.value = false
+    quizAutoScanned.value = false
+    failedVideos.value = new Set()
     await refreshSession()
   } catch (e) {
     await handleInlineError(e, (message) => { courseError.value = message })
   } finally {
     courseBusy.value = false
+    cloudLoading.value = ''
     refreshDebug()
   }
 }
 
 async function refreshCourse() {
+  if (playRunning.value) {
+    sayPlaying()
+    return
+  }
+  if (courseBusy.value) {
+    return
+  }
   courseBusy.value = true
   courseError.value = ''
+  cloudLoading.value = '正在从云端抓取课程结构…'
   try {
     courseDetail.value = await RefreshCourse()
-    chapterPage.value = 1
-    docPage.value = 1
-    openChapterId.value = ''
+    courseTab.value = 'video'
+    videoFilter.value = 'all'
+    docFilter.value = 'all'
     quizOverview.value = null
+    quizAutoFetched.value = false
+    quizAutoScanned.value = false
+    failedVideos.value = new Set()
     setNotice('课程结构已更新', 'ok')
   } catch (e) {
     await handleInlineError(e, (message) => { courseError.value = message })
   } finally {
     courseBusy.value = false
+    cloudLoading.value = ''
     refreshDebug()
   }
 }
@@ -936,14 +1283,22 @@ function isCurrent(course) {
 
 async function startPlay(objectID) {
   if (playRunning.value) {
+    sayPlaying()
     return
   }
   setNotice('')
   playState.value = emptyPlayState()
   const limit = objectID ? 0 : Number(playLimit.value) || 0
+  const speed = clampNumber(playSpeed.value, 1, 25, 1)
+  const tick = clampNumber(playTick.value, 1, 30, 10)
+  const limitedCount = Number((courseDetail.value && courseDetail.value.summary && courseDetail.value.summary.speedLimited) || 0)
   try {
-    const res = await StartPlay(objectID || '', Number(playSpeed.value) || 1, limit)
+    // 限速课默认也按设置的倍速播（不再提供开关）
+    const res = await StartPlay(objectID || '', speed, limit, tick, true)
     playRunning.value = true
+    if (speed > 1 && limitedCount > 0) {
+      setNotice('已按 ' + speed + ' 倍播放，含 ' + limitedCount + ' 个限速点；未通过就降速重试', 'info')
+    }
     if (!playState.value.state) {
       playState.value = {
         state: 'starting',
@@ -969,7 +1324,9 @@ async function startPlay(objectID) {
 
 function openPlayback() {
   if (hasCourse.value) {
-    showPage('video')
+    showPage('coursehome')
+    selectCourseTab('video')
+    window.scrollTo(0, 0)
   }
 }
 
@@ -1012,22 +1369,52 @@ function onPlayEvent(ev) {
   if (ev.state === 'passed' || ev.state === 'skipped' || ev.state === 'failed') {
     loadCourseDetail()
   }
+  if (ev.state === 'failed') {
+    markVideoFailed(ev.objectId)
+    setNotice('未通过：' + (ev.title || '这个任务点') + '；标记为失败，可以稍微降低倍速再试', 'error')
+  }
+  if (ev.state === 'passed') {
+    clearVideoFailed(ev.objectId)
+  }
   if (ev.state === 'finished' || ev.state === 'cancelled') {
     playRunning.value = false
     loadCourseDetail()
-    if (ev.message) {
-      setNotice(ev.message, ev.state === 'finished' ? 'ok' : 'info')
-    }
     if (ev.state === 'finished') {
-      notifyPlayback(ev.message || '播放任务已完成')
+      const text = finishedMessage(ev)
+      setNotice(text, ev.fail > 0 ? 'info' : 'ok')
+      notifyPlayback(text)
+    } else if (ev.message) {
+      setNotice(ev.message, 'info')
     }
   }
   refreshDebug()
 }
 
+// 播放一轮结束后的提示：成功给一句鼓励，有失败就说明失败数量并提示重试
+function finishedMessage(ev) {
+  if (ev.fail > 0) {
+    return '这一轮通过 ' + ev.ok + ' 个，' + ev.fail + ' 个没通过；已标成“失败”，可以重试一次'
+  }
+  if (ev.ok > 0) {
+    return '全部通过：这一轮完成 ' + ev.ok + ' 个任务点，收工'
+  }
+  if (ev.skipped > 0) {
+    return '这轮都是已经通过的缓存，没有要补的'
+  }
+  return ev.message || '播放结束'
+}
+
 async function scanDocs() {
+  if (playRunning.value) {
+    sayPlaying()
+    return
+  }
+  if (docBusy.value) {
+    return
+  }
   docBusy.value = true
   setNotice('')
+  cloudLoading.value = '正在从云端扫描文档任务…'
   try {
     courseDetail.value = await ScanCourse()
     setNotice('文档任务扫描完成', 'ok')
@@ -1035,20 +1422,40 @@ async function scanDocs() {
     await handleActionError(e)
   } finally {
     docBusy.value = false
+    cloudLoading.value = ''
     refreshDebug()
   }
 }
 
+// 完成未完成文档：批量提交给平台，回来后按完成前后的未完成数量给结果，别把“一个都没完成”说成成功
 async function completeDocs() {
+  if (playRunning.value) {
+    sayPlaying()
+    return
+  }
+  if (docBusy.value) {
+    return
+  }
   docBusy.value = true
   setNotice('')
+  cloudLoading.value = '正在从云端完成未完成文档…'
   try {
-    courseDetail.value = await CompleteDocs()
-    setNotice('文档任务处理完成，状态已刷新', 'ok')
+    const res = await CompleteDocs()
+    courseDetail.value = res.detail
+    // 结果按服务器确认的数量给（平台有时不回写卡片状态，不能只看列表数量）；
+    // 列表还没刷新时用 info，提示保留到下次操作，方便用户看到“稍后再扫”。
+    let kind = 'ok'
+    if (res.failed > 0 && res.done === 0) {
+      kind = 'error'
+    } else if (res.done > 0 && res.pending > 0) {
+      kind = 'info'
+    }
+    setNotice(res.message || '文档任务已处理', kind)
   } catch (e) {
     await handleActionError(e)
   } finally {
     docBusy.value = false
+    cloudLoading.value = ''
     refreshDebug()
   }
 }
@@ -1058,7 +1465,6 @@ async function loadQuizOverview() {
   quizError.value = ''
   try {
     quizOverview.value = await GetQuizOverview()
-    quizListPage.value = 1
     if (quizSelected.value && !quizItems.value.some((q) => q.workId === quizSelected.value)) {
       quizSelected.value = ''
       quizQuestions.value = []
@@ -1071,33 +1477,56 @@ async function loadQuizOverview() {
   }
 }
 
-async function scanForQuiz() {
+// auto 为 true 时是进块自动扫描：不重复显示成功提示，失败仍写 quizError
+async function scanForQuiz(auto) {
+  if (playRunning.value && !auto) {
+    sayPlaying()
+    return
+  }
+  if (quizBusy.value) {
+    return
+  }
   quizBusy.value = true
   quizError.value = ''
+  cloudLoading.value = '正在从云端扫描课程附件…'
   try {
     courseDetail.value = await ScanCourse()
     quizOverview.value = await GetQuizOverview()
-    quizListPage.value = 1
-    setNotice('课程附件扫描完成', 'ok')
+    if (auto) {
+      setNotice('课程附件已自动扫描', 'ok')
+    } else {
+      setNotice('课程附件扫描完成', 'ok')
+    }
   } catch (e) {
     await handleInlineError(e, (message) => { quizError.value = message })
   } finally {
     quizBusy.value = false
+    cloudLoading.value = ''
     refreshDebug()
   }
 }
 
-async function dumpQuizzes() {
+// 刷新：从云端抓未提交的作业/测验题目，写缓存后重读列表；本地没缓存时也会走这里
+async function refreshQuizzes() {
+  if (playRunning.value) {
+    sayPlaying()
+    return
+  }
+  if (quizBusy.value) {
+    return
+  }
+  quizAutoFetched.value = true
   quizBusy.value = true
   quizError.value = ''
+  cloudLoading.value = '正在从云端获取题目…'
   try {
     quizOverview.value = await DumpQuizzes()
-    quizListPage.value = 1
-    setNotice('题目抓取完成', 'ok')
+    setNotice('题目已从云端更新', 'ok')
   } catch (e) {
     await handleInlineError(e, (message) => { quizError.value = message })
   } finally {
     quizBusy.value = false
+    cloudLoading.value = ''
     refreshDebug()
   }
 }
@@ -1179,11 +1608,43 @@ async function clearQuizBank() {
   }
 }
 
+// 设置页里给小白看的申请入口：用系统浏览器打开 DeepSeek 控制台
+function openDeepSeekKeys() {
+  BrowserOpenURL('https://platform.deepseek.com/api_keys')
+}
+
+// 自动答题前先看病设置：没启用或没存 Key 就直接去设置页，不弹确认
+async function ensureQuizLLMReady() {
+  if (!quizSettings.value) {
+    await loadQuizSettings()
+  }
+  const settings = quizSettings.value
+  const masked = settings && settings.apiKeyMasked ? settings.apiKeyMasked : ''
+  if (!settings || !settings.enabled || !masked || masked === '(未填写)') {
+    // showPage 会清空提示，所以先跳页再写消息条
+    showPage('settings')
+    setNotice('先在设置里启用自动答题，并填入 DeepSeek 的 API Key', 'info')
+    return false
+  }
+  return true
+}
+
 async function solveQuizzes() {
+  if (playRunning.value) {
+    sayPlaying()
+    return
+  }
   if (quizSolving.value) {
     return
   }
-  if (!window.confirm('开始自动答题？会调用设置里的模型接口，答案只写在本机；如果开了自动交卷会直接提交。')) {
+  if (!(await ensureQuizLLMReady())) {
+    return
+  }
+  const autoSubmit = quizSettings.value && quizSettings.value.autoSubmit
+  const prompt = autoSubmit
+    ? '开始自动答题？会把题目发给 AI 模型（DeepSeek）作答；已开启自动交卷，答完会直接提交、不能再改。答案只保存在本机。'
+    : '开始自动答题？会把题目发给 AI 模型（DeepSeek）作答，答案只保存在本机；题库里已有的题不会重复调用。'
+  if (!window.confirm(prompt)) {
     return
   }
   quizSolving.value = true
@@ -1220,6 +1681,10 @@ function onQuizEvent(ev) {
 }
 
 async function submitQuizzes() {
+  if (playRunning.value) {
+    sayPlaying()
+    return
+  }
   if (quizSubmitting.value) {
     return
   }
@@ -1248,6 +1713,7 @@ async function toggleQuizPeek() {
   quizPeekOpen.value = true
   quizPeekBusy.value = true
   quizError.value = ''
+  cloudLoading.value = '正在从云端读取批阅结果…'
   try {
     quizPeekItems.value = await PeekQuizzes(-1)
   } catch (e) {
@@ -1255,6 +1721,7 @@ async function toggleQuizPeek() {
     await handleInlineError(e, (message) => { quizError.value = message })
   } finally {
     quizPeekBusy.value = false
+    cloudLoading.value = ''
   }
 }
 
@@ -1263,7 +1730,6 @@ async function openQuiz(item) {
     return
   }
   quizSelected.value = item.workId
-  quizQuestionPage.value = 1
   quizQuestions.value = []
   quizError.value = ''
   quizBusy.value = true
@@ -1344,6 +1810,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  clearNoticeTimer()
   stopQrTimer()
   if (typeof offQr === 'function') {
     offQr()
@@ -1376,7 +1843,7 @@ onUnmounted(() => {
     <header class="topbar">
       <div class="bar-left">
         <button v-if="page !== 'home'" class="back-btn" @click="goBack()">返回</button>
-        <button class="brand" @click="showPage('home')" aria-label="回到首页">
+        <button class="brand" @click="openAbout" aria-label="关于 hsc 课程助手">
           <span class="wordmark">hsc</span>
           <span class="dim">课程助手</span>
         </button>
@@ -1395,6 +1862,7 @@ onUnmounted(() => {
               <div class="menu-row"><span>记住账号</span><span class="v">{{ session && session.credSaved ? '已保存' : '未保存' }}</span></div>
               <div class="menu-row"><span>课程</span><span class="v">{{ session && session.hasTarget ? '已配置' : '未配置' }}</span></div>
               <button class="menu-action" @click="checkLoginState">检查登录态</button>
+              <button class="menu-action" @click="openHelp">帮助</button>
               <button v-if="session && session.credSaved" class="menu-action" @click="forgetCredentials">忘记保存的账号</button>
               <button class="menu-danger" @click="doLogout(false)">退出登录</button>
               <button v-if="session && session.credSaved" class="menu-danger" @click="doLogout(true)">退出并清除凭据</button>
@@ -1408,20 +1876,34 @@ onUnmounted(() => {
 
     <main v-if="page === 'home'" class="home">
       <h1 class="home-title">{{ title }}</h1>
-      <nav class="cards" aria-label="页面导航">
-        <button class="card" :class="{disabled: !loggedIn}" @click="openCourse">
-          <h2>课程</h2>
-          <p>{{ loggedIn ? '课程列表与任务点' : '课程列表与任务点，登录后可用' }}</p>
+
+      <div class="home-stage">
+        <span class="stage-halo" aria-hidden="true"></span>
+
+        <button class="course-hero" @click="openCourse">
+          <span class="hero-title">开始刷课吧</span>
+          <span class="hero-arrow" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M5 12h13M12 6l6 6-6 6"/></svg>
+          </span>
         </button>
-        <button class="card" @click="showPage('about')">
-          <h2>关于</h2>
-          <p>版本与说明</p>
-        </button>
-        <button v-if="mode.debug" class="card" @click="showPage('debug')">
-          <h2>调试</h2>
-          <p>环境与调用日志</p>
-        </button>
-      </nav>
+
+        <span class="hero-chip chip-video" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M4 6.8A2.8 2.8 0 0 1 6.8 4h10.4A2.8 2.8 0 0 1 20 6.8v10.4a2.8 2.8 0 0 1-2.8 2.8H6.8A2.8 2.8 0 0 1 4 17.2z"/><path d="m10 9 5 3-5 3z"/></svg>
+          视频任务
+        </span>
+        <span class="hero-chip chip-doc" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M7 3h7l4 4v14H7z"/><path d="M14 3v4h4M10 12h5M10 16h5"/></svg>
+          文档任务
+        </span>
+        <span class="hero-chip chip-quiz" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M9 5h10M9 12h10M9 19h10"/><path d="m4 5 1.2 1.2L7 4.4M4 12l1.2 1.2L7 11.4M4 19l1.2 1.2L7 18.4"/></svg>
+          作业与测验
+        </span>
+      </div>
+
+      <div v-if="mode.debug" class="home-debug-row">
+        <button class="ghost-link" @click="showPage('debug')">调试信息</button>
+      </div>
 
       <section v-if="mode.debug" class="debug-info" aria-label="调试信息">
         <div class="row">
@@ -1444,75 +1926,48 @@ onUnmounted(() => {
         <div class="page-head-text">
           <h1 class="page-title">{{ pageTitle }}</h1>
           <p v-if="pageLead" class="page-sub">{{ pageLead }}</p>
+          <button
+            v-if="page === 'coursehome' && hasCourse"
+            class="ghost-link head-refresh"
+            :class="{'play-blocked': playRunning}"
+            :aria-disabled="playRunning || null"
+            :title="playRunning ? '正在播放中，先停止播放' : ''"
+            @click="refreshCourse"
+            :disabled="courseBusy"
+          >{{ courseBusy ? '抓取中' : '重新抓取课程结构' }}</button>
         </div>
         <div v-if="page === 'course'" class="actions">
-          <button @click="loadCourses(true)" :disabled="courseLoading || courseBusy || playRunning">
-            {{ courseLoading ? '获取中' : '获取课程列表' }}
+          <button
+            :class="{'play-blocked': playRunning}"
+            :aria-disabled="playRunning || null"
+            :title="playRunning ? '正在播放中，先停止播放' : ''"
+            @click="refreshCourseList"
+            :disabled="courseLoading || courseBusy"
+          >
+            {{ courseLoading ? '刷新中' : '刷新' }}
           </button>
-        </div>
-        <div v-else-if="page === 'video'" class="actions">
-          <label class="play-speed">
-            数量
-            <select v-model.number="playLimit" :disabled="playRunning">
-              <option :value="0">全部</option>
-              <option :value="1">1 个</option>
-              <option :value="3">3 个</option>
-              <option :value="5">5 个</option>
-              <option :value="10">10 个</option>
-            </select>
-          </label>
-          <label class="play-speed">
-            倍速
-            <select v-model.number="playSpeed" :disabled="playRunning">
-              <option :value="1">1x</option>
-              <option :value="1.5">1.5x</option>
-              <option :value="2">2x</option>
-              <option :value="3">3x</option>
-            </select>
-          </label>
-          <button class="primary" @click="startPlay('')" :disabled="playRunning || docBusy || !unpassedVideos.length">
-            {{ playRunning ? '播放中' : (playCount ? '播放未完成 ' + playCount + ' 个' : '视频都已完成') }}
-          </button>
-          <button v-if="playRunning" @click="stopPlay">停止播放</button>
-        </div>
-        <div v-else-if="page === 'doc'" class="actions">
-          <button @click="scanDocs" :disabled="docBusy || playRunning">
-            {{ docBusy ? '处理中' : (docScanned ? '重新扫描' : '扫描文档任务') }}
-          </button>
-          <button v-if="docScanned && docUnpassed" class="primary" @click="completeDocs" :disabled="docBusy || playRunning">
-            完成未完成文档 {{ docUnpassed }} 个
-          </button>
-        </div>
-        <div v-else-if="page === 'quiz'" class="actions">
-          <button @click="dumpQuizzes" :disabled="quizBusy || playRunning || !quizOverview || !quizOverview.scanned">抓取题目</button>
-          <button class="primary" @click="solveQuizzes" :disabled="quizBusy || quizSolving || playRunning || !quizOverview || !quizOverview.scanned">
-            {{ quizSolving ? '答题中' : '自动答题' }}
-          </button>
-          <button @click="submitQuizzes" :disabled="quizBusy || quizSubmitting || quizSolving || playRunning || !quizOverview || !quizOverview.scanned">
-            {{ quizSubmitting ? '交卷中' : '交卷' }}
-          </button>
-          <button @click="showPage('settings')">测验设置</button>
         </div>
         <div v-else-if="page === 'debug' && mode.debug" class="actions">
           <button @click="refreshDebug" :disabled="debugBusy">{{ debugBusy ? '刷新中' : '刷新' }}</button>
+          <button @click="openDebugLog">打开日志</button>
           <button @click="clearDebug">清空日志</button>
         </div>
       </header>
 
       <div v-if="page === 'coursehome' && hasCourse" class="entry-list">
-        <button class="entry-row" @click="openVideoPage">
+        <button class="entry-row" :class="{active: courseTab === 'video'}" @click="selectCourseTab('video')">
           <span class="entry-main">
             <span class="entry-name">视频任务</span>
             <span class="hint">已完成 {{ courseDetail.summary.videosPassed }}/{{ courseDetail.summary.videos }} 个</span>
           </span>
         </button>
-        <button class="entry-row" @click="showPage('doc')">
+        <button class="entry-row" :class="{active: courseTab === 'doc'}" @click="selectCourseTab('doc')">
           <span class="entry-main">
             <span class="entry-name">文档任务</span>
             <span class="hint">{{ docScanned ? '已完成 ' + docPassed + '/' + docs.length + ' 个' : '未扫描' }}</span>
           </span>
         </button>
-        <button class="entry-row" @click="showPage('quiz')">
+        <button class="entry-row" :class="{active: courseTab === 'quiz'}" @click="selectCourseTab('quiz')">
           <span class="entry-main">
             <span class="entry-name">作业与测验</span>
             <span class="hint">{{ courseDetail.summary.works }} 个任务点</span>
@@ -1592,23 +2047,24 @@ onUnmounted(() => {
 
         <template v-else-if="page === 'course'">
           <p v-if="courseError" class="inline-error">{{ courseError }}</p>
-          <p v-if="!courseList.length && !courseLoading" class="hint">还没有课程列表，点右上角“获取课程列表”。</p>
+          <p v-if="!courseList.length && !courseLoading" class="hint">还没有课程列表，点右上角“刷新”。</p>
 
           <div v-if="courseList.length" class="course-list">
-            <div v-for="item in pagedCourses" :key="item.courseId" class="course-row">
+            <button
+              v-for="item in courseList"
+              :key="item.courseId"
+              class="course-row"
+              :class="{'play-blocked': playRunning}"
+              :aria-disabled="playRunning || null"
+              :title="playRunning ? '正在播放中，先停止播放' : ''"
+              :disabled="courseBusy || courseLoading"
+              @click="openCourseRow(item)"
+            >
               <span class="course-index">{{ item.index }}</span>
               <span class="course-name">{{ item.name || '未命名课程' }}</span>
               <span class="course-teacher">{{ item.teacher }}</span>
-              <span v-if="isCurrent(item)" class="course-current">当前</span>
-              <button @click="openCourseRow(item)" :disabled="courseBusy || courseLoading || playRunning">
-                {{ isCurrent(item) ? '打开' : '进入' }}
-              </button>
-            </div>
-          </div>
-          <div v-if="courseTotalPages > 1" class="pager actions">
-            <button :disabled="courseCurrentPage <= 1" @click="coursePage = courseCurrentPage - 1">上一页</button>
-            <span class="hint">第 {{ courseCurrentPage }} / {{ courseTotalPages }} 页，共 {{ courseList.length }} 门</span>
-            <button :disabled="courseCurrentPage >= courseTotalPages" @click="coursePage = courseCurrentPage + 1">下一页</button>
+              <svg class="course-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+            </button>
           </div>
 
           <p class="hint">进入课程后可以看视频任务、文档任务和作业与测验；课程结构在课程主页里。</p>
@@ -1617,7 +2073,13 @@ onUnmounted(() => {
             <summary>用课程链接进入</summary>
             <div class="course-link-row">
               <input v-model="courseURL" type="url" placeholder="粘贴课程页地址（含 courseid 与 clazzid）" @keyup.enter="openCourseByURL"/>
-              <button @click="openCourseByURL" :disabled="courseURLBusy || !courseURL.trim() || playRunning">
+              <button
+                :class="{'play-blocked': playRunning}"
+                :aria-disabled="playRunning || null"
+                :title="playRunning ? '正在播放中，先停止播放' : ''"
+                @click="openCourseByURL"
+                :disabled="courseURLBusy || !courseURL.trim()"
+              >
                 {{ courseURLBusy ? '抓取中' : '按链接进入' }}
               </button>
             </div>
@@ -1629,36 +2091,95 @@ onUnmounted(() => {
           <p v-if="courseError" class="inline-error">{{ courseError }}</p>
 
           <template v-if="hasCourse">
-            <div class="course-summary">
-              <span>章节 <b>{{ courseDetail.summary.chapters }}</b></span>
-              <span>总时长 <b>{{ courseDetail.summary.durationHours }}</b> 小时</span>
-              <span v-if="courseDetail.summary.speedLimited">限 1 倍速 <b>{{ courseDetail.summary.speedLimited }}</b> 个</span>
-            </div>
+            <p v-if="courseDetail.stale" class="warn-text">缓存属于另一门课，点“重新抓取课程结构”刷新。</p>
 
-            <div class="section-head">
-              <h3 class="section-title">课程结构</h3>
-              <div class="actions">
-                <button @click="refreshCourse" :disabled="courseBusy || playRunning">
-                  {{ courseBusy ? '抓取中' : '抓取课程结构' }}
+            <div class="block-head">
+              <div class="block-head-text">
+                <h2 class="block-title">{{ courseTabTitle }}</h2>
+                <span v-if="playRunning" class="play-hint">播放中，其他操作先停止播放</span>
+              </div>
+              <div v-if="courseTab === 'video'" class="actions">
+                <label class="play-speed">
+                  数量
+                  <select v-model.number="playLimit" :disabled="playRunning" :title="playRunning ? '正在播放中，先停止播放' : ''">
+                    <option :value="0">全部</option>
+                    <option :value="1">1 个</option>
+                    <option :value="3">3 个</option>
+                    <option :value="5">5 个</option>
+                    <option :value="10">10 个</option>
+                  </select>
+                </label>
+                <span class="play-summary">{{ playSpeed }}x · {{ playTick }}s</span>
+                <button
+                  class="settings-btn"
+                  :class="{'play-blocked': playRunning}"
+                  :aria-disabled="playRunning || null"
+                  :title="playRunning ? '正在播放中，先停止播放' : '播放设置：倍速与上报间隔'"
+                  @click="openPlaySettings"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                  播放设置
+                </button>
+                <button v-if="playRunning" class="primary" @click="stopPlay">停止播放</button>
+                <button v-else class="primary" @click="startPlay('')" :disabled="docBusy || !unpassedVideos.length">
+                  {{ playCount ? '播放未完成 ' + playCount + ' 个' : '视频都已完成' }}
                 </button>
               </div>
+              <div v-else-if="courseTab === 'doc'" class="actions">
+                <button
+                  :class="{'play-blocked': playRunning}"
+                  :aria-disabled="playRunning || null"
+                  :title="playRunning ? '正在播放中，先停止播放' : ''"
+                  @click="scanDocs"
+                  :disabled="docBusy"
+                >
+                  {{ docBusy ? '处理中' : (docScanned ? '重新扫描' : '扫描文档任务') }}
+                </button>
+                <button
+                  v-if="docScanned && docUnpassed"
+                  class="primary"
+                  :class="{'play-blocked': playRunning}"
+                  :aria-disabled="playRunning || null"
+                  :title="playRunning ? '正在播放中，先停止播放' : ''"
+                  @click="completeDocs"
+                  :disabled="docBusy"
+                >
+                  完成未完成文档 {{ docUnpassed }} 个
+                </button>
+              </div>
+              <div v-else class="actions">
+                <button
+                  v-if="quizPrimaryAction !== 'none'"
+                  :class="{'play-blocked': playRunning}"
+                  :aria-disabled="playRunning || null"
+                  :title="playRunning ? '正在播放中，先停止播放' : ''"
+                  @click="quizPrimaryAction === 'scan' ? scanForQuiz(false) : refreshQuizzes()"
+                  :disabled="quizBusy"
+                >
+                  {{ quizBusy ? '处理中' : quizPrimaryLabel }}
+                </button>
+                <button
+                  class="primary"
+                  :class="{'play-blocked': playRunning}"
+                  :aria-disabled="playRunning || null"
+                  :title="playRunning ? '正在播放中，先停止播放' : '把题目交给 AI 模型（DeepSeek）作答'"
+                  @click="solveQuizzes"
+                  :disabled="quizBusy || quizSolving || !quizReady"
+                >
+                  {{ quizSolving ? '答题中' : '自动答题' }}
+                </button>
+                <button
+                  :class="{'play-blocked': playRunning}"
+                  :aria-disabled="playRunning || null"
+                  :title="playRunning ? '正在播放中，先停止播放' : ''"
+                  @click="submitQuizzes"
+                  :disabled="quizBusy || quizSubmitting || quizSolving || !quizReady"
+                >
+                  {{ quizSubmitting ? '交卷中' : '交卷' }}
+                </button>
+                <button @click="showPage('settings')">测验设置</button>
+              </div>
             </div>
-            <p v-if="chapters.length" class="hint">共 {{ chapters.length }} 章，点章节看这一章的视频任务。</p>
-            <p v-else class="hint">还没有章节结构，点右上角“抓取课程结构”。</p>
-            <div v-if="chapters.length" class="chapter-list">
-              <button v-for="ch in pagedChapters" :key="ch.id" class="chapter-row" @click="openVideoChapter(ch)">
-                <span class="chapter-name">{{ ch.title || ('章节 ' + ch.index) }}</span>
-                <span class="hint">视频 {{ ch.videosPassed }}/{{ ch.videos }}</span>
-                <span class="hint">作业 {{ ch.works }}</span>
-                <span class="entry-go">看视频</span>
-              </button>
-            </div>
-            <div v-if="chapterTotalPages > 1" class="pager actions">
-              <button :disabled="chapterCurrentPage <= 1" @click="chapterPage = chapterCurrentPage - 1">上一页</button>
-              <span class="hint">第 {{ chapterCurrentPage }} / {{ chapterTotalPages }} 页，共 {{ chapters.length }} 章</span>
-              <button :disabled="chapterCurrentPage >= chapterTotalPages" @click="chapterPage = chapterCurrentPage + 1">下一页</button>
-            </div>
-            <p v-if="courseDetail.stale" class="warn-text">缓存属于另一门课，点右上角“抓取课程结构”刷新。</p>
           </template>
 
           <template v-else>
@@ -1669,87 +2190,146 @@ onUnmounted(() => {
           </template>
         </template>
 
-        <template v-else-if="page === 'video'">
-          <p v-if="courseError" class="inline-error">{{ courseError }}</p>
-
+        <template v-if="page === 'coursehome' && courseTab === 'video'">
           <template v-if="hasCourse">
-            <div class="play-status-block">
-              <div v-if="playState.message" class="play-status">
-                <div class="play-line">
-                  <span class="play-message">{{ playState.message }}</span>
-                  <span v-if="playState.index" class="hint">第 {{ playState.index }}/{{ playState.total }} 个</span>
-                  <span v-if="playState.speedLimited" class="hint">限 1 倍速</span>
-                  <span v-if="playState.duration" class="hint">{{ formatClock(playState.played) }} / {{ formatClock(playState.duration) }}</span>
+            <section v-if="!chapters.length" class="task-overview">
+              <div class="overview-empty">
+                <p class="overview-caption">还没有课程结构</p>
+                <p class="hint">点“重新抓取课程结构”，抓完这里会显示章节和视频进度。</p>
+              </div>
+            </section>
+
+            <template v-else>
+              <section class="task-overview" aria-label="视频完成概况">
+                <div class="overview-top">
+                  <div class="overview-figure">
+                    <b>{{ videoStats.percent }}%</b>
+                    <span class="overview-caption">{{ videoStats.passed }}/{{ videoStats.total }} 个视频已完成</span>
+                  </div>
+                  <div class="overview-chips">
+                    <span class="stat-chip">未完成 <b>{{ videoStats.todo }}</b></span>
+                    <span v-if="courseDetail.summary && courseDetail.summary.speedLimited" class="stat-chip">限 1 倍速 <b>{{ courseDetail.summary.speedLimited }}</b></span>
+                  </div>
                 </div>
-                <div v-if="playRunning && playState.duration" class="play-track">
-                  <div class="play-fill" :style="{width: Math.min(100, playState.percent || 0) + '%'}"></div>
+                <div class="overview-track">
+                  <div class="overview-fill" :style="{width: videoStats.percent + '%'}"></div>
+                </div>
+
+                <div v-if="playState.message" class="live-block">
+                  <div class="live-head">
+                    <span class="live-title">{{ playState.message }}</span>
+                    <span v-if="playState.index" class="live-meta">第 {{ playState.index }}/{{ playState.total }} 个</span>
+                    <span v-if="playState.speedLimited" class="live-meta">限 1 倍速</span>
+                    <span v-if="playState.duration" class="live-meta">{{ formatClock(playState.played) }} / {{ formatClock(playState.duration) }}</span>
+                  </div>
+                  <div v-if="playRunning && playState.duration" class="play-track">
+                    <div class="play-fill" :style="{width: playbackPercent + '%'}"></div>
+                  </div>
+                </div>
+                <p v-else class="hint">点「播放未完成」一次播完，也可以单条播；限速点默认按 1 倍，规则见「播放设置」。</p>
+              </section>
+
+              <div class="list-head">
+                <h3 class="list-title">章节任务</h3>
+                <div class="filter-row" role="group" aria-label="按完成情况筛选">
+                  <button :class="{active: videoFilter === 'all'}" @click="videoFilter = 'all'">全部 {{ videoStats.total }}</button>
+                  <button :class="{active: videoFilter === 'todo'}" @click="videoFilter = 'todo'">未完成 {{ videoStats.todo }}</button>
+                  <button :class="{active: videoFilter === 'done'}" @click="videoFilter = 'done'">已完成 {{ videoStats.passed }}</button>
                 </div>
               </div>
-              <p v-else class="hint">选择下面的视频开始播放。限 1 倍速的任务点会自动按 1 倍播放。</p>
-            </div>
 
-            <div v-if="chapters.length" class="chapter-list">
-              <details v-for="ch in pagedChapters" :key="ch.id" class="chapter" :open="ch.index <= 2 || openChapterId === ch.id">
-                <summary>
-                  <span class="chapter-name">{{ ch.title || ('章节 ' + ch.index) }}</span>
-                  <span class="hint">视频 {{ ch.videosPassed }}/{{ ch.videos }}</span>
-                </summary>
-                <ul class="task-list">
-                  <li v-for="(v, index) in videosByChapter[ch.id] || []" :key="'v' + ch.id + index" :class="{playing: playRunning && playState.objectId === v.objectId}">
-                    <span class="task-tag">视频</span>
-                    <span class="task-title">{{ v.title || '未命名视频' }}</span>
-                    <span class="hint">{{ formatDuration(v.duration) }}</span>
-                    <span v-if="v.isPassed" class="ok-text">已完成</span>
-                    <span v-else class="hint">未完成</span>
-                    <span v-if="v.speedLimited" class="hint">限 1 倍速</span>
-                    <button v-if="!v.isPassed" class="row-play" @click="startPlay(v.objectId)" :disabled="playRunning || docBusy">播放</button>
-                  </li>
-                  <li v-if="!(videosByChapter[ch.id] || []).length" class="hint">本章没有视频任务点。</li>
-                </ul>
-              </details>
-            </div>
-            <p v-else class="hint">还没有课程结构，回课程主页点“抓取课程结构”。</p>
-            <div v-if="chapterTotalPages > 1" class="pager actions">
-              <button :disabled="chapterCurrentPage <= 1" @click="chapterPage = chapterCurrentPage - 1">上一页</button>
-              <span class="hint">第 {{ chapterCurrentPage }} / {{ chapterTotalPages }} 页，共 {{ chapters.length }} 章</span>
-              <button :disabled="chapterCurrentPage >= chapterTotalPages" @click="chapterPage = chapterCurrentPage + 1">下一页</button>
-            </div>
+              <div v-if="videoFilteredChapters.length" class="chapter-list">
+                <details v-for="ch in videoFilteredChapters" :id="'chapter-' + ch.id" :key="ch.id" class="chapter" :open="isChapterOpen(ch)">
+                  <summary>
+                    <span class="chapter-name">{{ ch.title || ('章节 ' + ch.index) }}</span>
+                    <span v-if="chapterVideos(ch).length" class="chapter-bar" aria-hidden="true"><i :style="{width: chapterPercent(ch) + '%'}"></i></span>
+                    <span class="chapter-count">{{ chapterVideos(ch).length ? chapterPassed(ch) + '/' + chapterVideos(ch).length : '无视频' }}</span>
+                    <svg class="chapter-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+                  </summary>
+                  <ul class="task-list">
+                    <li v-for="(v, index) in chapterTaskVideos(ch)" :key="'v' + ch.id + index" :class="{playing: playRunning && playState.objectId === v.objectId}">
+                      <span class="task-main">
+                        <span class="task-title">{{ v.title || '未命名视频' }}</span>
+                        <span class="task-meta">{{ formatDuration(v.duration) }}{{ v.speedLimited ? ' · 限 1 倍速' : '' }}</span>
+                      </span>
+                      <span v-if="!v.isPassed && isVideoFailed(v.objectId)" class="status-chip is-failed">失败</span>
+                      <span v-else class="status-chip" :class="{'is-done': v.isPassed}">{{ v.isPassed ? '已完成' : '未完成' }}</span>
+                      <button
+                        v-if="!v.isPassed"
+                        class="row-play"
+                        :class="{'play-blocked': playRunning}"
+                        :aria-disabled="playRunning || null"
+                        :title="playRunning ? '正在播放中，先停止播放' : ''"
+                        @click="startPlay(v.objectId)"
+                        :disabled="docBusy"
+                      >播放</button>
+                    </li>
+                    <li v-if="!chapterTaskVideos(ch).length" class="task-empty">当前筛选下本章没有任务。</li>
+                  </ul>
+                </details>
+              </div>
+              <p v-else class="hint">当前筛选下没有章节。</p>
+            </template>
           </template>
         </template>
 
-        <template v-else-if="page === 'doc'">
-          <p v-if="courseError" class="inline-error">{{ courseError }}</p>
-
+        <template v-if="page === 'coursehome' && courseTab === 'doc'">
           <template v-if="hasCourse">
-            <p v-if="docScanned" class="hint">已完成 {{ docPassed }}/{{ docs.length }} 个文档任务。</p>
-            <p v-else class="hint">还没有扫描文档任务。点右上角“扫描文档任务”，需要十几秒。</p>
-            <p v-if="docScanned && !docs.length" class="hint">这门课没有文档任务点。</p>
+            <section class="task-overview" aria-label="文档完成概况">
+              <template v-if="docScanned && docs.length">
+                <div class="overview-top">
+                  <div class="overview-figure">
+                    <b>{{ docPercent }}%</b>
+                    <span class="overview-caption">{{ docPassed }}/{{ docs.length }} 个文档已完成</span>
+                  </div>
+                  <div class="overview-chips">
+                    <span class="stat-chip">未完成 <b>{{ docUnpassed }}</b></span>
+                  </div>
+                </div>
+                <div class="overview-track">
+                  <div class="overview-fill" :style="{width: docPercent + '%'}"></div>
+                </div>
+              </template>
+              <div v-else-if="docScanned" class="overview-empty">
+                <p class="overview-caption">这门课没有文档任务点</p>
+                <p class="hint">扫描结果里没有附件文档，不用处理。</p>
+              </div>
+              <div v-else class="overview-empty">
+                <p class="overview-caption">还没有扫描文档任务</p>
+                <p class="hint">点「扫描文档任务」逐章读取附件，完成后会再扫一次刷新状态。</p>
+              </div>
+            </section>
 
-            <ul v-if="docs.length" class="task-list doc-list">
-              <li v-for="(d, index) in pagedDocs" :key="'d' + d.chapterId + index">
-                <span class="task-tag">文档</span>
-                <span class="task-title">{{ d.title || '未命名文档' }}</span>
-                <span v-if="d.chapterIndex" class="hint">第 {{ d.chapterIndex }} 章</span>
-                <span v-if="d.isPassed" class="ok-text">已完成</span>
-                <span v-else class="hint">未完成</span>
-              </li>
-            </ul>
-            <div v-if="docTotalPages > 1" class="pager actions">
-              <button :disabled="docCurrentPage <= 1" @click="docPage = docCurrentPage - 1">上一页</button>
-              <span class="hint">第 {{ docCurrentPage }} / {{ docTotalPages }} 页，共 {{ docs.length }} 个</span>
-              <button :disabled="docCurrentPage >= docTotalPages" @click="docPage = docCurrentPage + 1">下一页</button>
-            </div>
-            <p class="hint">扫描会逐章读取附件；完成后会重新扫描刷新状态。</p>
+            <template v-if="docScanned && docs.length">
+              <div class="list-head">
+                <h3 class="list-title">文档清单</h3>
+                <div class="filter-row" role="group" aria-label="按完成情况筛选">
+                  <button :class="{active: docFilter === 'all'}" @click="docFilter = 'all'">全部 {{ docs.length }}</button>
+                  <button :class="{active: docFilter === 'todo'}" @click="docFilter = 'todo'">未完成 {{ docUnpassed }}</button>
+                  <button :class="{active: docFilter === 'done'}" @click="docFilter = 'done'">已完成 {{ docPassed }}</button>
+                </div>
+              </div>
+
+              <ul v-if="docFilteredDocs.length" class="task-list doc-list">
+                <li v-for="(d, index) in docFilteredDocs" :key="'d' + d.chapterId + index">
+                  <span class="task-main">
+                    <span class="task-title">{{ d.title || '未命名文档' }}</span>
+                    <span v-if="docChapterLabel(d)" class="task-meta">{{ docChapterLabel(d) }}</span>
+                  </span>
+                  <span class="status-chip" :class="{'is-done': d.isPassed}">{{ d.isPassed ? '已完成' : '未完成' }}</span>
+                </li>
+              </ul>
+              <p v-else class="hint">当前筛选下没有文档。</p>
+            </template>
           </template>
         </template>
 
-        <template v-else-if="page === 'quiz'">
+        <template v-if="page === 'coursehome' && courseTab === 'quiz' && hasCourse">
           <p v-if="quizError" class="inline-error">{{ quizError }}</p>
-          <p v-if="quizOverview" class="hint">{{ quizOverview.message }}</p>
-          <p v-else class="hint">正在读取作业与测验...</p>
+          <p class="hint">{{ quizOverview ? quizOverview.message : '正在读取作业与测验...' }}</p>
+          <p class="hint ai-hint">「自动答题」是把题目交给 AI 模型（DeepSeek）作答，答案只保存在本机；交卷仍要你自己确认。</p>
 
           <div class="quiz-tools actions">
-            <button @click="loadQuizOverview" :disabled="quizBusy">刷新列表</button>
             <button @click="toggleQuizPeek" :disabled="quizPeekBusy">
               {{ quizPeekOpen ? '收起批阅结果' : (quizPeekBusy ? '读取中' : '批阅结果') }}
             </button>
@@ -1789,10 +2369,10 @@ onUnmounted(() => {
               <p v-if="quizBusy && !quizQuestions.length" class="hint">正在读取题目...</p>
               <p v-else-if="!quizQuestions.length" class="hint">这份作业或测验没有可显示的题目。</p>
               <div class="quiz-questions">
-                <div v-for="(q, i) in pagedQuizQuestions" :key="q.qid + '-' + i" class="quiz-question">
+                <div v-for="(q, i) in quizQuestions" :key="q.qid + '-' + i" class="quiz-question">
                   <div class="quiz-stem">
                     <span class="task-tag">{{ q.typeLabel || '题目' }}</span>
-                    <span class="quiz-stem-text">{{ (quizQuestionCurrentPage - 1) * QUESTION_PAGE_SIZE + i + 1 }}. {{ q.stem }}</span>
+                    <span class="quiz-stem-text">{{ i + 1 }}. {{ q.stem }}</span>
                     <span v-if="q.score" class="hint">{{ q.score }} 分</span>
                   </div>
                   <ul v-if="q.options && q.options.length" class="quiz-options">
@@ -1801,17 +2381,12 @@ onUnmounted(() => {
                   <p v-else-if="q.blankCount" class="hint">填空题，共 {{ q.blankCount }} 空</p>
                 </div>
               </div>
-              <div v-if="quizQuestionTotalPages > 1" class="pager actions">
-                <button :disabled="quizQuestionCurrentPage <= 1" @click="quizQuestionPage = quizQuestionCurrentPage - 1">上一页</button>
-                <span class="hint">第 {{ quizQuestionCurrentPage }} / {{ quizQuestionTotalPages }} 页</span>
-                <button :disabled="quizQuestionCurrentPage >= quizQuestionTotalPages" @click="quizQuestionPage = quizQuestionCurrentPage + 1">下一页</button>
-              </div>
             </template>
 
             <template v-else>
               <p v-if="!quizItems.length" class="hint">这门课没有作业或测验任务点。</p>
               <div v-else class="quiz-list">
-                <div v-for="item in pagedQuizItems" :key="item.workId" class="quiz-row">
+                <div v-for="item in quizItems" :key="item.workId" class="quiz-row">
                   <span class="course-index">{{ item.chapterIndex || '' }}</span>
                   <span class="quiz-title">{{ item.title }}</span>
                   <span v-if="item.fetched" class="hint">{{ item.questionCount }} 题</span>
@@ -1821,26 +2396,14 @@ onUnmounted(() => {
                   </button>
                 </div>
               </div>
-              <div v-if="quizTotalPages > 1" class="pager actions">
-                <button :disabled="quizCurrentPage <= 1" @click="quizListPage = quizCurrentPage - 1">上一页</button>
-                <span class="hint">第 {{ quizCurrentPage }} / {{ quizTotalPages }} 页，共 {{ quizItems.length }} 份</span>
-                <button :disabled="quizCurrentPage >= quizTotalPages" @click="quizListPage = quizCurrentPage + 1">下一页</button>
-              </div>
               <p class="hint">抓取题目只拉取未提交的作业与测验；已提交的会显示“未抓取”。</p>
             </template>
           </template>
 
-          <template v-else-if="quizOverview">
-            <div class="actions">
-              <button class="primary" @click="scanForQuiz" :disabled="quizBusy">
-                {{ quizBusy ? '扫描中' : '扫描课程附件' }}
-              </button>
-            </div>
-            <p class="hint">扫描会逐章读取附件，可能需要十几秒；扫描后“抓取题目”才有内容。</p>
-          </template>
+          <p v-else-if="quizOverview" class="hint">还没有扫描课程附件，稍等自动扫描；也可以点工具条的“扫描附件”。</p>
         </template>
 
-        <template v-else-if="page === 'settings'">
+        <template v-if="page === 'settings'">
           <p v-if="quizSettingsError" class="inline-error">{{ quizSettingsError }}</p>
           <p v-if="!quizSettings" class="hint">正在读取设置...</p>
 
@@ -1850,13 +2413,13 @@ onUnmounted(() => {
                 <input v-model="quizSettings.enabled" type="checkbox"/>
                 <span>启用自动答题</span>
               </label>
-              <p class="hint">启用后“自动答题”才会调用设置里的模型接口；关闭时其他功能不受影响。</p>
+              <p class="hint">「自动答题」会把题目发给 AI 模型（DeepSeek）作答，答案只保存在本机；关闭时不会调用 AI。</p>
             </div>
 
             <div class="settings-grid">
               <div class="field">
                 <label>接口地址</label>
-                <input v-model.trim="quizSettings.baseUrl" type="url" placeholder="https://api.openai.com/v1"/>
+                <input v-model.trim="quizSettings.baseUrl" type="url" placeholder="https://api.deepseek.com/v1"/>
               </div>
               <div class="field">
                 <label>API Key</label>
@@ -1866,10 +2429,15 @@ onUnmounted(() => {
                   autocomplete="off"
                   :placeholder="quizSettings.apiKeyMasked && quizSettings.apiKeyMasked !== '(未填写)' ? '留空沿用已保存的 Key（' + quizSettings.apiKeyMasked + '）' : '填写 API Key'"
                 />
+                <p class="field-hint">
+                  没有 Key？
+                  <a href="https://platform.deepseek.com/api_keys" @click.prevent="openDeepSeekKeys">到 DeepSeek 控制台申请</a>
+                </p>
               </div>
               <div class="field">
                 <label>模型</label>
-                <input v-model.trim="quizSettings.model" type="text" placeholder="gpt-4o-mini"/>
+                <input v-model.trim="quizSettings.model" type="text" placeholder="deepseek-flash"/>
+                <p class="field-hint">通用用 deepseek-flash；更强的可以用 deepseek-v4-pro。旧的 deepseek-chat 已下线。</p>
               </div>
               <div class="field">
                 <label>温度</label>
@@ -1929,21 +2497,35 @@ onUnmounted(() => {
           </template>
         </template>
 
-        <template v-else-if="page === 'about'">
-          <dl class="facts">
-            <div><dt>版本</dt><dd>{{ mode.version }}（{{ mode.mode }}）</dd></div>
-            <div><dt>登录态</dt><dd>与 hsc 命令行共用，保存在 state 目录</dd></div>
-            <div><dt>数据</dt><dd>登录信息只保存在本机，不上传账号</dd></div>
-            <template v-if="mode.debug">
-              <div><dt>state 目录</dt><dd class="mono">{{ session ? session.stateDir : '—' }}</dd></div>
-            </template>
-          </dl>
-          <div class="actions">
-            <button class="primary" @click="showPage('home')">回首页</button>
-          </div>
+        <template v-if="page === 'play-settings'">
+          <section class="play-setting">
+            <div class="setting-head">
+              <label for="play-speed-range">倍速</label>
+              <strong>{{ playSpeed }}×</strong>
+            </div>
+            <input id="play-speed-range" v-model.number="playSpeed" type="range" min="1" max="25" step="0.5"/>
+            <div class="preset-row">
+              <button v-for="v in [1, 2, 3, 5, 10, 25]" :key="'sp' + v" :class="{active: Number(playSpeed) === v}" @click="playSpeed = v">{{ v }}×</button>
+            </div>
+            <p class="setting-note is-warn">限速课采用高倍数播放，平台可能不会判定通过，请手动补看最后部分，或者换低倍数重试。</p>
+          </section>
+
+          <section class="play-setting">
+            <div class="setting-head">
+              <label for="play-tick-range">上报间隔</label>
+              <strong>{{ playTick }} 秒</strong>
+            </div>
+            <input id="play-tick-range" v-model.number="playTick" type="range" min="1" max="30" step="1"/>
+            <p class="setting-note">只在播放时生效：间隔越短上报越频繁，总用时 = 视频时长 / 倍速。</p>
+          </section>
+
+          <footer class="play-setting-foot">
+            <span class="hint">自动保存，下次播放生效。</span>
+            <button class="ghost-link" @click="resetPlaySettings">恢复默认</button>
+          </footer>
         </template>
 
-        <template v-else-if="page === 'debug' && mode.debug">
+        <template v-if="page === 'debug' && mode.debug">
           <div v-if="debugInfo" class="debug-grid">
             <div><span>模式</span><b>{{ debugInfo.mode }}</b></div>
             <div><span>state 目录</span><b class="mono">{{ debugInfo.stateDir }}</b></div>
@@ -1953,6 +2535,7 @@ onUnmounted(() => {
             <div><span>系统</span><b>{{ debugInfo.os }}/{{ debugInfo.arch }}</b></div>
             <div><span>cookie 数量</span><b>{{ debugInfo.cookieCount }}</b></div>
             <div><span>登录态</span><b>{{ debugInfo.loggedIn ? '存在' : '无' }}</b></div>
+            <div class="debug-wide"><span>日志文件</span><b class="mono">{{ debugInfo.logPath || '—' }}</b></div>
           </div>
 
           <h3>最近日志</h3>
@@ -1971,7 +2554,72 @@ onUnmounted(() => {
       </section>
     </main>
 
-    <p v-if="notice" class="notice" :class="noticeKind">{{ notice }}</p>
+    <transition name="modal">
+      <div v-if="aboutOpen" class="about-backdrop" @click.self="closeAbout">
+        <div class="about-dialog" role="dialog" aria-modal="true" aria-labelledby="about-title">
+          <button ref="aboutCloseRef" class="about-close" @click="closeAbout" aria-label="关闭介绍">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+          <h2 id="about-title" class="about-title">hsc 课程助手</h2>
+          <p class="about-desc">课程、视频、文档与测验任务的桌面助手，登录态和课程缓存与 hsc 命令行共用。</p>
+          <dl class="facts">
+            <div><dt>版本</dt><dd>{{ mode.version }}（{{ mode.mode }}）</dd></div>
+            <div><dt>登录态</dt><dd>与 hsc 命令行共用，保存在 state 目录</dd></div>
+            <div><dt>数据</dt><dd>登录信息只保存在本机，不上传账号</dd></div>
+            <div v-if="mode.debug"><dt>state 目录</dt><dd class="mono">{{ session ? session.stateDir : '—' }}</dd></div>
+          </dl>
+          <div class="about-actions">
+            <button class="primary" @click="closeAbout">知道了</button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <transition name="modal">
+      <div v-if="helpOpen" class="about-backdrop" @click.self="closeHelp">
+        <div class="about-dialog help-dialog" role="dialog" aria-modal="true" aria-labelledby="help-title">
+          <button ref="helpCloseRef" class="about-close" @click="closeHelp" aria-label="关闭帮助">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg>
+          </button>
+          <h2 id="help-title" class="about-title">帮助</h2>
+          <div class="help-body">
+            <section>
+              <h3>入门</h3>
+              <p>顶栏登录后点「开始刷课吧」选课程，课程页用三张卡切换视频、文档和作业与测验。</p>
+            </section>
+            <section>
+              <h3>视频播放</h3>
+              <p>「播放未完成」一次播完剩余任务点；播放中主按钮变成「停止播放」，其他操作会先提示停播。</p>
+              <p>齿轮进「播放设置」：倍速 1–25，上报间隔 1–30 秒（默认 10）。间隔只影响上报频率，总用时 = 视频时长 / 倍速。</p>
+              <p>限速课也会按设置的倍速播放；平台可能不判定通过，必要时手动补看最后部分或降速重试。</p>
+            </section>
+            <section>
+              <h3>文档任务</h3>
+              <p>先扫描附件，再「完成未完成文档」。结果按完成前后的数量给出，没完成的可以重新扫描再试。</p>
+            </section>
+            <section>
+              <h3>作业与测验</h3>
+              <p>进块会自动扫描附件、抓取未提交的题目；「刷新」从云端重抓。答题和交卷会真实提交，交卷前有确认。</p>
+              <p>「自动答题」是把题目交给 AI 模型（默认 DeepSeek）作答，答案只存在本机；交卷仍要你自己确认。</p>
+            </section>
+            <section>
+              <h3>常见问题</h3>
+              <p>登录态失效时回登录页重新登录，课程与题目缓存会保留。</p>
+              <p>数据都在 state 目录，和 hsc 命令行共用；debug 构建的调试页能看到具体路径。</p>
+              <p>系统通知不可用时，播放完成不会弹通知，结果仍会显示在页面和消息条里。</p>
+            </section>
+          </div>
+          <div class="about-actions">
+            <button class="primary" @click="closeHelp">知道了</button>
+          </div>
+        </div>
+      </div>
+    </transition>
+
+    <div class="message-bar" :class="[messageKind, {show: !!messageText, leaving: noticeLeaving}]" role="status" aria-live="polite">
+      <span v-if="cloudLoading" class="cloud-spinner" aria-hidden="true"></span>
+      <span class="message-bar-text">{{ messageText }}</span>
+    </div>
   </div>
 </template>
 
@@ -1992,9 +2640,9 @@ onUnmounted(() => {
   justify-content: space-between;
   height: 52px;
   padding: 0 24px;
-  background: rgba(245, 245, 247, 0.72);
-  -webkit-backdrop-filter: saturate(180%) blur(20px);
-  backdrop-filter: saturate(180%) blur(20px);
+  background: rgba(245, 245, 247, 0.25);
+  -webkit-backdrop-filter: saturate(180%) blur(30px);
+  backdrop-filter: saturate(180%) blur(30px);
   border-bottom: 1px solid var(--line-soft);
 }
 
@@ -2150,12 +2798,12 @@ onUnmounted(() => {
 }
 
 .debug-tag {
-  padding: 0 7px;
+  padding: 0 8px;
   border: 1px solid var(--line);
   border-radius: var(--radius-pill);
   color: var(--muted);
-  font-size: 11px;
-  line-height: 18px;
+  font-size: 12px;
+  line-height: 19px;
 }
 
 .login-btn {
@@ -2177,88 +2825,355 @@ onUnmounted(() => {
 .home {
   flex: 1 0 auto;
   width: 100%;
-  max-width: 720px;
+  max-width: 760px;
   margin: 0 auto;
-  padding: 32px 24px 40px;
+  padding: 40px 24px 48px;
   box-sizing: border-box;
   display: flex;
   flex-direction: column;
+  align-items: center;
   justify-content: center;
 }
 
 .home-title {
-  margin: 0 0 120px;
+  margin: 0 0 56px;
   font-size: 40px;
   font-weight: 700;
   letter-spacing: -0.02em;
   line-height: 1.15;
   text-align: center;
   text-wrap: balance;
+  /* 标语始终单行：窄屏靠缩字号放下，不换行 */
+  white-space: nowrap;
 }
 
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 12px;
+/* 首页主按钮：整屏只有一个焦点，周围只留几个轻量标签 */
+.home-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
-  max-width: 560px;
-  margin: 0 auto;
+  max-width: 500px;
+  min-height: 210px;
 }
 
-.card {
+.stage-halo {
+  position: absolute;
+  width: min(400px, 92%);
+  height: 200px;
+  border-radius: 50%;
+  background: radial-gradient(closest-side, rgba(0, 113, 227, 0.13), rgba(0, 113, 227, 0));
+  pointer-events: none;
+}
+
+.course-hero {
+  position: relative;
+  z-index: 2;
   display: flex;
   flex-direction: column;
-  justify-content: space-between;
-  min-height: 104px;
-  padding: 16px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-lg);
-  background: var(--surface);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
-  text-align: left;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  width: min(280px, 100%);
+  min-height: 112px;
+  padding: 18px 20px;
+  border: none;
+  border-radius: var(--radius-xl);
+  overflow: hidden;
+  background:
+    radial-gradient(130% 100% at 18% 0%, rgba(255, 255, 255, 0.26) 0%, rgba(255, 255, 255, 0) 52%),
+    linear-gradient(148deg, #2f9dff 0%, #0071e3 46%, #0057ad 100%);
+  color: #ffffff;
   cursor: pointer;
-  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  box-shadow:
+    0 22px 40px -20px rgba(0, 84, 176, 0.55),
+    0 2px 6px rgba(0, 0, 0, 0.06);
+  transition: transform 1s cubic-bezier(0.16, 1, 0.3, 1), box-shadow 1s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
-.card:hover {
-  background: var(--surface-2);
-  border-color: rgba(0, 0, 0, 0.1);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+.course-hero::before {
+  content: "";
+  position: absolute;
+  top: -50%;
+  bottom: -50%;
+  left: -40%;
+  width: 34%;
+  background: linear-gradient(100deg, transparent 0%, rgba(255, 255, 255, 0.26) 46%, rgba(255, 255, 255, 0.05) 62%, transparent 100%);
+  transform: translateX(-130%) rotate(8deg);
+  transition: transform 0.55s cubic-bezier(0.2, 0.8, 0.2, 1);
+  pointer-events: none;
 }
 
-.card:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
+.course-hero:hover {
+  transform: translateY(-3px);
+  box-shadow:
+    0 30px 52px -22px rgba(0, 84, 176, 0.62),
+    0 4px 10px rgba(0, 0, 0, 0.08);
 }
 
-.card h2 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
+.course-hero:hover::before {
+  transform: translateX(430%) rotate(8deg);
+}
+
+.course-hero:active {
+  transform: translateY(-1px) scale(0.997);
+}
+
+.course-hero:focus-visible {
+  outline: 3px solid rgba(0, 113, 227, 0.35);
+  outline-offset: 4px;
+}
+
+.hero-title {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+}
+
+.hero-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.course-hero:hover .hero-arrow {
+  background: rgba(255, 255, 255, 0.26);
+  transform: translateY(2px);
+}
+
+.hero-arrow svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.hero-chip {
+  position: absolute;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 8px 18px -14px rgba(0, 0, 0, 0.4);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  transform: rotate(var(--chip-tilt, 0deg));
+}
+
+.hero-chip svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chip-video {
+  top: 30px;
+  left: 38px;
+  --chip-tilt: 4deg;
+}
+
+.chip-doc {
+  bottom: 26px;
+  left: 30px;
+  --chip-tilt: -6deg;
+}
+
+.chip-quiz {
+  top: 82px;
+  right: 18px;
+  --chip-tilt: -3deg;
+}
+
+.home-debug-row {
+  margin-top: 4px;
+}
+
+.ghost-link {
+  border: none;
+  background: transparent;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.ghost-link:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(0, 0, 0, 0.04);
+}
+
+.ghost-link:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* 播放中不可用的按钮：压暗但保持可点，点一下用底部消息条说明原因 */
+.play-blocked {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 关于弹层：点顶栏品牌弹出，替代原来的关于页 */
+.about-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.about-dialog {
+  position: relative;
+  width: min(430px, 100%);
+  padding: 28px 28px 22px;
+  border: 1px solid var(--line-soft);
+  border-radius: 22px;
+  background: var(--surface);
+  box-shadow: 0 32px 80px -28px rgba(0, 0, 0, 0.45);
+  box-sizing: border-box;
+}
+
+.about-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.about-close:hover {
+  background: rgba(0, 0, 0, 0.05);
   color: var(--text);
 }
 
-.card p {
-  margin: 8px 0 0;
-  font-size: 12px;
+.about-close svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.about-title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.about-desc {
+  margin: 8px 0 18px;
   color: var(--muted);
-  line-height: 1.45;
+  line-height: 1.6;
 }
 
-.card.disabled {
-  background: #fafafc;
-  box-shadow: none;
+.about-dialog .facts {
+  margin: 0;
 }
 
-.card.disabled h2,
-.card.disabled p {
-  color: #b0b0b5;
+/* 帮助弹层：内容比关于多一些，可滚动 */
+.help-dialog {
+  width: min(560px, 100%);
 }
 
-.card.disabled:hover {
-  background: #fafafc;
-  border-color: var(--line-soft);
-  box-shadow: none;
+.help-body {
+  max-height: min(60vh, 520px);
+  margin-top: 14px;
+  padding-right: 4px;
+  overflow: auto;
+}
+
+.help-body h3 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.help-body section:first-child h3 {
+  margin-top: 0;
+}
+
+.help-body p {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.about-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 20px;
+}
+
+.modal-enter-active,
+.modal-leave-active {
+  transition: opacity 0.16s ease;
+}
+
+.modal-enter-from,
+.modal-leave-to {
+  opacity: 0;
+}
+
+@media (max-width: 700px) {
+  .home-title {
+    margin-bottom: 36px;
+  }
+
+  .home-stage {
+    flex-wrap: wrap;
+    gap: 10px;
+    min-height: 0;
+    padding-top: 8px;
+  }
+
+  .stage-halo {
+    display: none;
+  }
+
+  .course-hero {
+    min-height: 108px;
+  }
+
+  .hero-chip {
+    position: static;
+    transform: none;
+  }
 }
 
 .debug-info {
@@ -2408,8 +3323,7 @@ button.primary:disabled {
 
 .actions button:not(.primary),
 .tabs button,
-.captcha-actions button,
-.course-row button {
+.captcha-actions button {
   height: 32px;
   padding: 0 14px;
   border: 1px solid var(--line);
@@ -2421,8 +3335,7 @@ button.primary:disabled {
 }
 
 .actions button:not(.primary):hover:not(:disabled),
-.captcha-actions button:hover:not(:disabled),
-.course-row button:hover:not(:disabled) {
+.captcha-actions button:hover:not(:disabled) {
   background: var(--surface-2);
 }
 
@@ -2472,6 +3385,25 @@ button.primary:disabled {
 
 .field input:focus {
   border-color: var(--primary);
+}
+
+/* 字段下方的小提示：申请 Key 的入口、模型怎么填 */
+.field-hint {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.field-hint a {
+  color: var(--link);
+  text-decoration: none;
+}
+
+.field-hint a:hover,
+.field-hint a:focus-visible {
+  text-decoration: underline;
+  outline: none;
 }
 
 .captcha-row {
@@ -2531,6 +3463,11 @@ button.primary:disabled {
   font-size: 12px;
 }
 
+/* 自动答题 = 调 AI 的说明，和列表状态提示贴在一起 */
+.ai-hint {
+  margin-top: 2px;
+}
+
 .facts {
   margin: 16px 0 20px;
   display: flex;
@@ -2560,25 +3497,49 @@ button.primary:disabled {
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-md);
   margin: 8px 0;
+  overflow: hidden;
 }
 
 .course-row {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  border: none;
   border-bottom: 1px solid #f5f6f7;
+  background: transparent;
+  font-family: inherit;
   font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s ease;
 }
 
 .course-row:last-child {
   border-bottom: none;
 }
 
+.course-row:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.course-row:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.course-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
 .course-index {
   flex: none;
-  width: 22px;
-  color: var(--muted);
+  width: 24px;
+  color: var(--muted-2);
+  font-variant-numeric: tabular-nums;
 }
 
 .course-name {
@@ -2587,21 +3548,30 @@ button.primary:disabled {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
 }
 
 .course-teacher {
   flex: none;
-  width: 80px;
+  width: 96px;
   color: var(--muted);
+  font-size: 12px;
+  text-align: right;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.course-current {
+.course-chevron {
   flex: none;
-  font-size: 12px;
-  color: var(--primary);
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--muted-2);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* 课程链接入口 */
@@ -2663,21 +3633,7 @@ button.primary:disabled {
   cursor: default;
 }
 
-.course-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  margin: 10px 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.course-summary b {
-  color: var(--text);
-  font-weight: 600;
-}
-
-/* 课程主页入口 */
+/* 课程页入口卡：三张卡当标签页，选中态用蓝色描边 + 浅蓝底 */
 .entry-list {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -2718,6 +3674,16 @@ button.primary:disabled {
   outline-offset: 2px;
 }
 
+.entry-row.active {
+  border-color: rgba(0, 113, 227, 0.45);
+  background: #f2f7ff;
+  box-shadow: 0 1px 2px rgba(0, 113, 227, 0.12);
+}
+
+.entry-row.active .entry-name {
+  color: var(--link);
+}
+
 .entry-main {
   display: flex;
   flex-direction: column;
@@ -2736,102 +3702,364 @@ button.primary:disabled {
   line-height: 1.45;
 }
 
-.entry-go {
-  flex: none;
-  color: var(--link);
-  font-size: 13px;
+/* 课程页：标题下的重新抓取 + 面板里的块标题 */
+.head-refresh {
+  margin-top: 8px;
 }
 
-.section-head {
+.block-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   flex-wrap: wrap;
-  margin: 20px 0 8px;
+  margin: 0 0 16px;
 }
 
-.section-head .section-title {
-  margin: 0;
-}
-
-.chapter-row {
+.block-head-text {
   display: flex;
   align-items: baseline;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
-  width: 100%;
-  padding: 8px 12px;
-  border: 1px solid var(--line-soft);
-  border-radius: var(--radius-md);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.chapter-row:hover {
-  background: var(--surface-2);
-}
-
-.chapter-row:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: 2px;
-}
-
-.chapter-row .chapter-name {
-  flex: 1;
   min-width: 0;
 }
 
-.chapter-row .hint {
+.block-title {
   margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
 }
 
-.chapter-row .entry-go {
+.play-hint {
+  color: var(--muted);
   font-size: 12px;
+}
+
+/* 视频 / 文档任务：总览、筛选、清单 */
+.task-overview {
+  margin: 0 0 20px;
+  padding: 16px 18px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-md);
+  background: var(--surface-2);
+}
+
+.overview-top {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.overview-figure {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+.overview-figure b {
+  font-size: 28px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+
+.overview-caption {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.overview-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.stat-chip {
+  padding: 3px 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.stat-chip b {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.overview-track {
+  height: 6px;
+  margin: 12px 0 0;
+  border-radius: 3px;
+  background: #e5e5ea;
+  overflow: hidden;
+}
+
+.overview-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--primary);
+  transition: width 0.4s ease;
+}
+
+.overview-empty .overview-caption {
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.overview-empty .hint {
+  margin: 4px 0 0;
+}
+
+.live-block {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.live-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.live-title {
+  min-width: 0;
+  font-size: 13px;
+  word-break: break-all;
+}
+
+.live-meta {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.list-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 0 0 10px;
+}
+
+.list-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.filter-row {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--radius-pill);
+  background: #f0f0f3;
+}
+
+.filter-row button {
+  height: 26px;
+  padding: 0 12px;
+  border: none;
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.filter-row button:hover {
+  color: var(--text);
+}
+
+.filter-row button.active {
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.filter-row button:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
 }
 
 .chapter-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  margin-top: 8px;
+  gap: 10px;
+  margin-top: 0;
 }
 
 .chapter {
   border: 1px solid var(--line-soft);
   border-radius: var(--radius-md);
-  padding: 8px 12px;
+  padding: 0;
+  background: var(--surface);
+  scroll-margin-top: 64px;
 }
 
 .chapter summary {
   cursor: pointer;
   display: flex;
-  gap: 12px;
-  align-items: baseline;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  list-style: none;
+}
+
+.chapter summary::-webkit-details-marker {
+  display: none;
+}
+
+.chapter summary:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+  border-radius: var(--radius-md);
 }
 
 .chapter-name {
   font-weight: 500;
 }
 
+.chapter summary .chapter-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+}
+
+.chapter-bar {
+  flex: none;
+  width: 48px;
+  height: 4px;
+  border-radius: 2px;
+  background: #e5e5ea;
+  overflow: hidden;
+}
+
+.chapter-bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--primary);
+}
+
+.chapter-count {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chapter-chevron {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.chapter[open] .chapter-chevron {
+  transform: rotate(90deg);
+}
+
 .task-list {
-  margin: 8px 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
-  max-height: 280px;
-  overflow: auto;
+  border-top: 1px solid var(--line-soft);
+}
+
+/* 收起的章节不要留布局盒子：Chromium 的 details 用 content-visibility 藏内容，
+   自绘 summary 时会被量成“文字叠在一起”，这里直接 display: none。 */
+.chapter:not([open]) > .task-list {
+  display: none;
 }
 
 .task-list li {
   display: flex;
-  gap: 8px;
-  align-items: baseline;
-  padding: 3px 0;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
   font-size: 13px;
+}
+
+.task-list li + li {
+  border-top: 1px solid var(--line-soft);
+}
+
+.task-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.task-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 窄窗口里标题允许折行，把“未完成”标签让给播放按钮（已完成仍显示） */
+@media (max-width: 480px) {
+  .status-chip:not(.is-done) {
+    display: none;
+  }
+
+  .task-title {
+    overflow: visible;
+    white-space: normal;
+    overflow-wrap: break-word;
+  }
+}
+
+.task-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-chip {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  background: #f0f0f3;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.status-chip.is-done {
+  background: #e8f5ec;
+  color: #1a6b2f;
+}
+
+.status-chip.is-failed {
+  background: #fdeeee;
+  color: #a02f2a;
+}
+
+.task-empty {
+  color: var(--muted);
 }
 
 .task-tag {
@@ -2843,14 +4071,6 @@ button.primary:disabled {
   padding: 0 4px;
 }
 
-.task-title {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .ok-text {
   color: #1a6b2f;
 }
@@ -2860,10 +4080,6 @@ button.primary:disabled {
 }
 
 /* 播放 */
-.play-status-block {
-  margin: 0 0 12px;
-}
-
 .play-speed {
   display: inline-flex;
   align-items: center;
@@ -2882,8 +4098,126 @@ button.primary:disabled {
   font-size: 13px;
 }
 
-.play-status {
-  margin-top: 0;
+/* 工具条里的当前倍速 / 间隔摘要 + 播放设置按钮（浅蓝描边，比图标更显眼） */
+.play-summary {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.actions button.settings-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid rgba(0, 113, 227, 0.28);
+  border-radius: var(--radius-pill);
+  background: #f2f7ff;
+  color: var(--link);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.actions button.settings-btn:hover,
+.actions button.settings-btn:focus-visible {
+  border-color: rgba(0, 113, 227, 0.5);
+  background: #e8f1ff;
+  outline: none;
+}
+
+.settings-btn svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+/* 播放设置页：一段一个设置，留白为主 */
+.play-setting {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 2px 0 24px;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.play-setting:last-of-type {
+  border-bottom: none;
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+}
+
+.setting-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.setting-head label {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.setting-head strong {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+
+.play-setting input[type='range'] {
+  width: 100%;
+  /* 滑条本身只有 16px 高，上下补 padding 把可点范围撑到 32px */
+  padding: 8px 0;
+  accent-color: var(--primary);
+}
+
+.setting-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+/* 限速课的风险说明用黄色字，比普通说明更醒目 */
+.setting-note.is-warn {
+  color: #a35c00;
+}
+
+.play-setting-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.preset-row button {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.preset-row button.active {
+  border-color: rgba(0, 113, 227, 0.45);
+  background: #f2f7ff;
+  color: var(--link);
 }
 
 .play-line {
@@ -2942,20 +4276,6 @@ button.primary:disabled {
 .row-play:disabled {
   color: var(--muted);
   cursor: default;
-}
-
-/* 文档任务 */
-.doc-list {
-  max-height: none;
-}
-
-/* 分页 */
-.pager {
-  margin: 10px 0 4px;
-}
-
-.pager .hint {
-  margin: 0;
 }
 
 /* 作业与测验列表 */
@@ -3093,9 +4413,45 @@ button.primary:disabled {
 }
 
 .check-row input {
+  /* 真实输入框做成 24px 透明覆盖层：点击区够大，视觉交给 span::before 画 16px 方框 */
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  transform: translateY(-50%);
+  opacity: 0;
+  cursor: pointer;
+}
+
+.check-row {
+  position: relative;
+  padding-left: 32px;
+}
+
+.check-row span::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 50%;
   width: 16px;
   height: 16px;
-  accent-color: var(--primary);
+  transform: translateY(-50%);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--surface);
+  box-sizing: border-box;
+}
+
+.check-row input:checked + span::before {
+  border-color: var(--primary);
+  background: var(--primary) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='m3.5 8.5 3 3 6-7' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center/12px no-repeat;
+}
+
+.check-row input:focus-visible + span::before {
+  outline: 2px solid var(--link);
+  outline-offset: 2px;
 }
 
 .check-list {
@@ -3184,6 +4540,11 @@ button.primary:disabled {
   min-width: 0;
 }
 
+/* 日志路径太长，单独占满一行，减少断行 */
+.debug-grid > div.debug-wide {
+  grid-column: 1 / -1;
+}
+
 .debug-grid span {
   flex: none;
   width: 76px;
@@ -3247,12 +4608,15 @@ button.primary:disabled {
   white-space: pre-wrap;
 }
 
-.notice {
+/* 底部消息条：加载中显示转圈 + 文案，平时显示提示；节点常驻，只切显隐不改结构 */
+.message-bar {
   position: fixed;
   left: 50%;
   bottom: 20px;
-  transform: translateX(-50%);
   z-index: 50;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   max-width: 80%;
   padding: 8px 14px;
   border-radius: var(--radius-pill);
@@ -3260,20 +4624,72 @@ button.primary:disabled {
   color: #ffffff;
   font-size: 13px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translate(-50%, 8px);
+  transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-.notice.error {
+.message-bar.show {
+  opacity: 1;
+  visibility: visible;
+  transform: translate(-50%, 0);
+}
+
+/* 成功提示到点后单独用 1 秒的透明度过渡淡出，文案在淡出期间保留 */
+.message-bar.leaving {
+  opacity: 0;
+  transition: opacity 1s ease;
+}
+
+.message-bar.error {
   background: rgba(215, 0, 21, 0.92);
 }
 
-.notice.ok {
+.message-bar.ok {
   background: rgba(26, 107, 47, 0.92);
+}
+
+.message-bar-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cloud-spinner {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.28);
+  border-top-color: #ffffff;
+  border-radius: 50%;
+  animation: cloud-spin 0.8s linear infinite;
+}
+
+@keyframes cloud-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message-bar,
+  .message-bar.leaving {
+    transition: none;
+  }
+
+  .cloud-spinner {
+    animation: none;
+  }
 }
 
 @media (max-width: 680px) {
   .home-title {
     margin-bottom: 80px;
-    font-size: 32px;
+    /* 6vw 保证最长 14 字的标语在 375 宽也放得下，且始终单行 */
+    font-size: clamp(22px, 6vw, 32px);
   }
 
   .topbar {
@@ -3308,9 +4724,20 @@ button.primary:disabled {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .card,
+  .course-hero,
+  .hero-arrow,
   .entry-row {
     transition: none;
+  }
+
+  .course-hero::before {
+    display: none;
+  }
+
+  .course-hero:hover,
+  .course-hero:active,
+  .course-hero:hover .hero-arrow {
+    transform: none;
   }
 }
 </style>

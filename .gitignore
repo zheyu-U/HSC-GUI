@@ -6,11 +6,15 @@ todos/
 .cache/
 .scaffold/
 
+# 本地 UI 预览夹具（假数据，不参与打包）
+frontend/dev-preview/
+
 # 运行状态（凭据/cookie/日志，永不入库）
 state/
 
 # 构建产物
 build/bin/
+build/dist-test/
 frontend/dist/*
 !frontend/dist/gitkeep
 frontend/node_modules/

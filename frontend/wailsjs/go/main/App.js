@@ -82,6 +82,10 @@ export function Logout(arg1) {
   return window['go']['main']['App']['Logout'](arg1);
 }
 
+export function OpenDebugLog() {
+  return window['go']['main']['App']['OpenDebugLog']();
+}
+
 export function PeekQuizzes(arg1) {
   return window['go']['main']['App']['PeekQuizzes'](arg1);
 }
@@ -118,8 +122,8 @@ export function StartCaptcha() {
   return window['go']['main']['App']['StartCaptcha']();
 }
 
-export function StartPlay(arg1, arg2, arg3) {
-  return window['go']['main']['App']['StartPlay'](arg1, arg2, arg3);
+export function StartPlay(arg1, arg2, arg3, arg4, arg5) {
+  return window['go']['main']['App']['StartPlay'](arg1, arg2, arg3, arg4, arg5);
 }
 
 export function StartQRLogin() {

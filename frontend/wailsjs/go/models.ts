@@ -40,28 +40,6 @@ export namespace hsc {
 	        this.message = source["message"];
 	    }
 	}
-	export class CourseChapter {
-	    index: number;
-	    id: string;
-	    title: string;
-	    videos: number;
-	    videosPassed: number;
-	    works: number;
-	
-	    static createFrom(source: any = {}) {
-	        return new CourseChapter(source);
-	    }
-	
-	    constructor(source: any = {}) {
-	        if ('string' === typeof source) source = JSON.parse(source);
-	        this.index = source["index"];
-	        this.id = source["id"];
-	        this.title = source["title"];
-	        this.videos = source["videos"];
-	        this.videosPassed = source["videosPassed"];
-	        this.works = source["works"];
-	    }
-	}
 	export class CourseDoc {
 	    chapterIndex: number;
 	    chapterId: string;
@@ -126,6 +104,28 @@ export namespace hsc {
 	        this.isPassed = source["isPassed"];
 	        this.speedLimited = source["speedLimited"];
 	        this.playTime = source["playTime"];
+	    }
+	}
+	export class CourseChapter {
+	    index: number;
+	    id: string;
+	    title: string;
+	    videos: number;
+	    videosPassed: number;
+	    works: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new CourseChapter(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.index = source["index"];
+	        this.id = source["id"];
+	        this.title = source["title"];
+	        this.videos = source["videos"];
+	        this.videosPassed = source["videosPassed"];
+	        this.works = source["works"];
 	    }
 	}
 	export class CourseSummary {
@@ -224,6 +224,48 @@ export namespace hsc {
 		    return a;
 		}
 	}
+	export class CompleteDocsResult {
+	    detail: CourseDetail;
+	    done: number;
+	    skipped: number;
+	    failed: number;
+	    pending: number;
+	    message: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CompleteDocsResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.detail = this.convertValues(source["detail"], CourseDetail);
+	        this.done = source["done"];
+	        this.skipped = source["skipped"];
+	        this.failed = source["failed"];
+	        this.pending = source["pending"];
+	        this.message = source["message"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	
+	
 	
 	export class CourseItem {
 	    index: number;
@@ -641,6 +683,7 @@ export namespace main {
 	    arch: string;
 	    cookieCount: number;
 	    loggedIn: boolean;
+	    logPath: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new DebugInfo(source);
@@ -657,6 +700,7 @@ export namespace main {
 	        this.arch = source["arch"];
 	        this.cookieCount = source["cookieCount"];
 	        this.loggedIn = source["loggedIn"];
+	        this.logPath = source["logPath"];
 	    }
 	}
 
